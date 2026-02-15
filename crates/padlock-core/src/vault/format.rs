@@ -1,0 +1,440 @@
+//! Binary vault file format parsing and serialization.
+//!
+//! Handles the vault header (1024 bytes), vault index (MessagePack),
+//! and entry metadata structures. All multi-byte integers use
+//! little-endian byte order.
+//!
+//! # Vault File Structure
+//!
+//! ```text
+//! [Header (1024 bytes)] [Index (variable)] [Entries (variable)] [HMAC (32 bytes)]
+//! ```
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+use crate::error::{Error, VaultError};
+
+/// Magic bytes at the start of every vault file.
+pub const MAGIC: &[u8; 8] = b"PADLOCK\0";
+
+/// Current vault format version.
+pub const VERSION: u8 = 1;
+
+/// Fixed header size in bytes.
+pub const HEADER_SIZE: usize = 1024;
+
+/// HMAC size appended at the end of the vault file.
+pub const VAULT_HMAC_SIZE: usize = 32;
+
+/// Vault file header (fixed 1024 bytes).
+///
+/// Contains metadata about the vault including the Argon2 salt,
+/// entry counts, and section lengths. All multi-byte integers
+/// are stored in little-endian byte order.
+#[derive(Debug, Clone)]
+pub struct VaultHeader {
+    /// Magic bytes: "PADLOCK\0".
+    pub magic: [u8; 8],
+    /// Protocol version (currently 1).
+    pub version: u8,
+    /// Flags (bit 0: encrypted).
+    pub flags: u8,
+    /// Argon2id salt for KDF (16 bytes).
+    pub argon2_salt: [u8; 16],
+    /// Vault UUID (16 bytes).
+    pub vault_uuid: [u8; 16],
+    /// Creation timestamp (Unix seconds).
+    pub created_timestamp: u64,
+    /// Last modification timestamp (Unix seconds).
+    pub modified_timestamp: u64,
+    /// Number of active (non-deleted) entries.
+    pub entry_count: u32,
+    /// Number of logically deleted entries.
+    pub deleted_entry_count: u32,
+    /// Length of the vault index section in bytes.
+    pub vault_index_length: u32,
+    /// Total length of the entries blob in bytes.
+    pub entries_blob_length: u32,
+}
+
+impl VaultHeader {
+    /// Create a new vault header with the given parameters.
+    #[must_use]
+    pub fn new(argon2_salt: [u8; 16], vault_uuid: [u8; 16], now: u64) -> Self {
+        Self {
+            magic: *MAGIC,
+            version: VERSION,
+            flags: 0x01, // encrypted
+            argon2_salt,
+            vault_uuid,
+            created_timestamp: now,
+            modified_timestamp: now,
+            entry_count: 0,
+            deleted_entry_count: 0,
+            vault_index_length: 0,
+            entries_blob_length: 0,
+        }
+    }
+
+    /// Validate that the magic bytes are correct.
+    #[must_use]
+    pub fn is_magic_valid(&self) -> bool {
+        self.magic == *MAGIC
+    }
+
+    /// Validate that the version is supported.
+    #[must_use]
+    pub fn is_version_valid(&self) -> bool {
+        self.version == VERSION
+    }
+}
+
+/// Serialize a vault header to exactly 1024 bytes.
+///
+/// # Layout (little-endian)
+///
+/// ```text
+/// Offset  Size  Field
+/// 0       8     MAGIC
+/// 8       1     VERSION
+/// 9       1     FLAGS
+/// 10      2     RESERVED1
+/// 12      16    ARGON2_SALT
+/// 28      16    VAULT_UUID
+/// 44      8     CREATED_TIMESTAMP
+/// 52      8     MODIFIED_TIMESTAMP
+/// 60      4     ENTRY_COUNT
+/// 64      4     DELETED_ENTRY_COUNT
+/// 68      4     VAULT_INDEX_LENGTH
+/// 72      4     ENTRIES_BLOB_LENGTH
+/// 76      948   RESERVED (zeros)
+/// ```
+#[must_use]
+pub fn serialize_header(header: &VaultHeader) -> [u8; HEADER_SIZE] {
+    let mut buf = [0u8; HEADER_SIZE];
+
+    buf[0..8].copy_from_slice(&header.magic);
+    buf[8] = header.version;
+    buf[9] = header.flags;
+    // bytes 10-11: reserved (already zero)
+    buf[12..28].copy_from_slice(&header.argon2_salt);
+    buf[28..44].copy_from_slice(&header.vault_uuid);
+    buf[44..52].copy_from_slice(&header.created_timestamp.to_le_bytes());
+    buf[52..60].copy_from_slice(&header.modified_timestamp.to_le_bytes());
+    buf[60..64].copy_from_slice(&header.entry_count.to_le_bytes());
+    buf[64..68].copy_from_slice(&header.deleted_entry_count.to_le_bytes());
+    buf[68..72].copy_from_slice(&header.vault_index_length.to_le_bytes());
+    buf[72..76].copy_from_slice(&header.entries_blob_length.to_le_bytes());
+    // bytes 76-1023: reserved (already zero)
+
+    buf
+}
+
+/// Parse a vault header from a byte slice.
+///
+/// The input must be at least 1024 bytes.
+///
+/// # Errors
+///
+/// Returns `VaultError::InvalidFormat` if the data is too short,
+/// the magic bytes are wrong, or the version is unsupported.
+pub fn parse_header(data: &[u8]) -> crate::error::Result<VaultHeader> {
+    if data.len() < HEADER_SIZE {
+        return Err(Error::Vault(VaultError::InvalidFormat {
+            reason: format!(
+                "header too short: expected {} bytes, got {}",
+                HEADER_SIZE,
+                data.len()
+            ),
+        }));
+    }
+
+    let mut magic = [0u8; 8];
+    magic.copy_from_slice(&data[0..8]);
+
+    let version = data[8];
+    let flags = data[9];
+
+    let mut argon2_salt = [0u8; 16];
+    argon2_salt.copy_from_slice(&data[12..28]);
+
+    let mut vault_uuid = [0u8; 16];
+    vault_uuid.copy_from_slice(&data[28..44]);
+
+    let created_timestamp = u64::from_le_bytes(data[44..52].try_into().unwrap_or([0u8; 8]));
+    let modified_timestamp = u64::from_le_bytes(data[52..60].try_into().unwrap_or([0u8; 8]));
+    let entry_count = u32::from_le_bytes(data[60..64].try_into().unwrap_or([0u8; 4]));
+    let deleted_entry_count = u32::from_le_bytes(data[64..68].try_into().unwrap_or([0u8; 4]));
+    let vault_index_length = u32::from_le_bytes(data[68..72].try_into().unwrap_or([0u8; 4]));
+    let entries_blob_length = u32::from_le_bytes(data[72..76].try_into().unwrap_or([0u8; 4]));
+
+    let header = VaultHeader {
+        magic,
+        version,
+        flags,
+        argon2_salt,
+        vault_uuid,
+        created_timestamp,
+        modified_timestamp,
+        entry_count,
+        deleted_entry_count,
+        vault_index_length,
+        entries_blob_length,
+    };
+
+    if !header.is_magic_valid() {
+        return Err(Error::Vault(VaultError::InvalidFormat {
+            reason: "invalid magic bytes".to_string(),
+        }));
+    }
+
+    if !header.is_version_valid() {
+        return Err(Error::Vault(VaultError::InvalidFormat {
+            reason: format!("unsupported version: {}", header.version),
+        }));
+    }
+
+    Ok(header)
+}
+
+/// Metadata for a single entry in the vault index.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntryMetadata {
+    /// Entry UUID (16 bytes).
+    pub uuid: [u8; 16],
+    /// Byte offset of this entry in the entries blob.
+    pub entry_offset: u64,
+    /// Length of this entry's data in bytes.
+    pub entry_length: u32,
+    /// Creation timestamp (Unix seconds).
+    pub created_at: u64,
+    /// Last modification timestamp (Unix seconds).
+    pub modified_at: u64,
+    /// Whether this entry has been logically deleted.
+    pub deleted: bool,
+    /// Entry title/name (for index lookups without decryption).
+    pub title: String,
+}
+
+/// Vault index mapping entry UUIDs to their metadata.
+///
+/// The index is serialized as MessagePack and stored between the
+/// header and the entries blob in the vault file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultIndex {
+    /// Map from entry UUID to entry metadata.
+    pub entries: HashMap<[u8; 16], EntryMetadata>,
+}
+
+impl VaultIndex {
+    /// Create a new empty vault index.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    /// Get the number of active (non-deleted) entries.
+    #[must_use]
+    pub fn active_count(&self) -> usize {
+        self.entries.values().filter(|e| !e.deleted).count()
+    }
+
+    /// Get the number of deleted entries.
+    #[must_use]
+    pub fn deleted_count(&self) -> usize {
+        self.entries.values().filter(|e| e.deleted).count()
+    }
+}
+
+impl Default for VaultIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Serialize a vault index to MessagePack bytes.
+///
+/// # Errors
+///
+/// Returns `VaultError::InvalidFormat` if serialization fails.
+pub fn serialize_index(index: &VaultIndex) -> crate::error::Result<Vec<u8>> {
+    rmp_serde::to_vec(index).map_err(|e| {
+        Error::Vault(VaultError::InvalidFormat {
+            reason: format!("index serialization failed: {e}"),
+        })
+    })
+}
+
+/// Deserialize a vault index from MessagePack bytes.
+///
+/// # Errors
+///
+/// Returns `VaultError::InvalidFormat` if deserialization fails.
+pub fn deserialize_index(data: &[u8]) -> crate::error::Result<VaultIndex> {
+    rmp_serde::from_slice(data).map_err(|e| {
+        Error::Vault(VaultError::InvalidFormat {
+            reason: format!("index deserialization failed: {e}"),
+        })
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_header() -> VaultHeader {
+        VaultHeader::new([0xAA; 16], [0xBB; 16], 1_700_000_000)
+    }
+
+    #[test]
+    fn test_header_serialize_deserialize_round_trip() {
+        let header = test_header();
+        let bytes = serialize_header(&header);
+        assert_eq!(bytes.len(), HEADER_SIZE);
+        let parsed = parse_header(&bytes).unwrap();
+        assert_eq!(parsed.magic, header.magic);
+        assert_eq!(parsed.version, header.version);
+        assert_eq!(parsed.flags, header.flags);
+        assert_eq!(parsed.argon2_salt, header.argon2_salt);
+        assert_eq!(parsed.vault_uuid, header.vault_uuid);
+        assert_eq!(parsed.created_timestamp, header.created_timestamp);
+        assert_eq!(parsed.modified_timestamp, header.modified_timestamp);
+        assert_eq!(parsed.entry_count, header.entry_count);
+        assert_eq!(parsed.deleted_entry_count, header.deleted_entry_count);
+    }
+
+    #[test]
+    fn test_header_is_exactly_1024_bytes() {
+        let header = test_header();
+        let bytes = serialize_header(&header);
+        assert_eq!(bytes.len(), 1024);
+    }
+
+    #[test]
+    fn test_header_magic_at_offset_zero() {
+        let header = test_header();
+        let bytes = serialize_header(&header);
+        assert_eq!(&bytes[0..8], MAGIC);
+    }
+
+    #[test]
+    fn test_header_invalid_magic_rejected() {
+        let mut bytes = serialize_header(&test_header());
+        bytes[0] = 0xFF; // Corrupt magic
+        let result = parse_header(&bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_header_invalid_version_rejected() {
+        let mut header = test_header();
+        header.version = 99;
+        // Manually construct bytes with bad version
+        let mut bytes = serialize_header(&header);
+        bytes[8] = 99;
+        // Magic is correct but version should fail
+        // Need to re-set magic since serialize uses header.magic
+        bytes[0..8].copy_from_slice(MAGIC);
+        let result = parse_header(&bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_header_too_short_rejected() {
+        let result = parse_header(&[0u8; 100]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_header_with_entry_counts() {
+        let mut header = test_header();
+        header.entry_count = 42;
+        header.deleted_entry_count = 5;
+        header.vault_index_length = 1234;
+        header.entries_blob_length = 56789;
+        let bytes = serialize_header(&header);
+        let parsed = parse_header(&bytes).unwrap();
+        assert_eq!(parsed.entry_count, 42);
+        assert_eq!(parsed.deleted_entry_count, 5);
+        assert_eq!(parsed.vault_index_length, 1234);
+        assert_eq!(parsed.entries_blob_length, 56789);
+    }
+
+    #[test]
+    fn test_index_empty_round_trip() {
+        let index = VaultIndex::new();
+        let bytes = serialize_index(&index).unwrap();
+        let deserialized = deserialize_index(&bytes).unwrap();
+        assert_eq!(deserialized.entries.len(), 0);
+    }
+
+    #[test]
+    fn test_index_with_entries_round_trip() {
+        let mut index = VaultIndex::new();
+        let uuid = [0x11; 16];
+        index.entries.insert(
+            uuid,
+            EntryMetadata {
+                uuid,
+                entry_offset: 0,
+                entry_length: 100,
+                created_at: 1_700_000_000,
+                modified_at: 1_700_000_001,
+                deleted: false,
+                title: "test-entry".to_string(),
+            },
+        );
+        let bytes = serialize_index(&index).unwrap();
+        let deserialized = deserialize_index(&bytes).unwrap();
+        assert_eq!(deserialized.entries.len(), 1);
+        let entry = deserialized.entries.get(&uuid).unwrap();
+        assert_eq!(entry.title, "test-entry");
+        assert_eq!(entry.entry_length, 100);
+    }
+
+    #[test]
+    fn test_index_active_and_deleted_counts() {
+        let mut index = VaultIndex::new();
+        index.entries.insert(
+            [1; 16],
+            EntryMetadata {
+                uuid: [1; 16],
+                entry_offset: 0,
+                entry_length: 50,
+                created_at: 0,
+                modified_at: 0,
+                deleted: false,
+                title: "active".to_string(),
+            },
+        );
+        index.entries.insert(
+            [2; 16],
+            EntryMetadata {
+                uuid: [2; 16],
+                entry_offset: 50,
+                entry_length: 50,
+                created_at: 0,
+                modified_at: 0,
+                deleted: true,
+                title: "deleted".to_string(),
+            },
+        );
+        assert_eq!(index.active_count(), 1);
+        assert_eq!(index.deleted_count(), 1);
+    }
+
+    #[test]
+    fn test_header_magic_valid() {
+        let header = test_header();
+        assert!(header.is_magic_valid());
+    }
+
+    #[test]
+    fn test_header_version_valid() {
+        let header = test_header();
+        assert!(header.is_version_valid());
+    }
+}

@@ -1,0 +1,31 @@
+[package]
+name = "padlock-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[[bin]]
+name = "fuzz_vault_parser"
+path = "fuzz_targets/fuzz_vault_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_msgpack_deserialize"
+path = "fuzz_targets/fuzz_msgpack_deserialize.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_ssh_agent_message"
+path = "fuzz_targets/fuzz_ssh_agent_message.rs"
+test = false
+doc = false
+
+[dependencies]
+libfuzzer-sys = "0.4"
+padlock-core = { path = "../crates/padlock-core" }
+rmp-serde = "1.3"

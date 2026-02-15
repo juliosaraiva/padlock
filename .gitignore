@@ -1,0 +1,31 @@
+# Build artifacts
+/target/
+**/target/
+
+# Cargo lock is committed for binaries
+# Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+.claude/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage
+*.profraw
+*.profdata
+lcov.info
+coverage.svg
+
+# Fuzz artifacts (crashes are important, not the corpus)
+fuzz/corpus/
+
+# Environment
+.env
+.env.local

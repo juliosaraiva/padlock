@@ -1,0 +1,73 @@
+[package]
+name = "padlock-core"
+description = "Core library for the Padlock credential manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+# AEAD encryption (security-critical: pinned)
+chacha20poly1305 = "=0.10.1"
+
+# Key derivation (security-critical: pinned)
+argon2 = "=0.5.3"
+hkdf = "=0.12.4"
+
+# Hashing and HMAC (security-critical: pinned)
+sha1 = "=0.10.6"
+sha2 = "=0.10.8"
+hmac = "=0.12.1"
+
+# TOTP base32 decoding
+data-encoding = "2.6"
+
+# Secure memory and secrets (security-critical: pinned)
+zeroize = { version = "=1.8.1", features = ["derive"] }
+secrecy = { version = "=0.10.3", features = ["serde"] }
+subtle = "=2.6.1"
+
+# Randomness (security-critical: pinned)
+rand = "=0.8.5"
+getrandom = "=0.2.15"
+
+# SSH key support (security-critical: pinned)
+ed25519-dalek = { version = "=2.1.1", features = ["rand_core", "serde"] }
+
+# X25519 key agreement for session transit encryption (security-critical: pinned)
+x25519-dalek = { version = "=2.0.1", features = ["static_secrets"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rmp-serde = "1.3"
+
+# Identity
+uuid = { version = "1.11", features = ["v4", "serde"] }
+
+# Time
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+# Configuration
+toml = "0.8"
+
+# Error handling
+thiserror = "2.0"
+
+# Platform-specific memory operations (mlock)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+proptest = "1.5"
+tempfile = "3.14"
+padlock-test-utils = { path = "../padlock-test-utils" }
+
+[lints]
+workspace = true

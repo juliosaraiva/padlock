@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  merge_group:
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build workspace
+        run: cargo build --workspace --verbose
+        env:
+          CARGO_INCREMENTAL: 0
+
+      - name: Run tests
+        run: cargo test --workspace --verbose
+        env:
+          RUST_BACKTRACE: 1
+
+      - name: Run clippy lints
+        run: cargo clippy --workspace --all-targets -- -D warnings -D clippy::pedantic
+        continue-on-error: false
+
+      - name: Check code formatting
+        run: cargo fmt --all -- --check
