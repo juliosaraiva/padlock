@@ -318,10 +318,17 @@ impl VaultIndex {
     }
 
     /// Add an entry's tags to the tag index.
+    ///
+    /// Duplicate UUIDs for the same tag are silently ignored, so calling this
+    /// method multiple times with the same `uuid` / `tags` combination is
+    /// idempotent and `search_by_tag` will never return duplicate entries.
     pub fn add_tags(&mut self, uuid: [u8; 16], tags: &[String]) {
         for tag in tags {
             let key = tag.to_lowercase();
-            self.tag_index.entry(key).or_default().push(uuid);
+            let uuids = self.tag_index.entry(key).or_default();
+            if !uuids.contains(&uuid) {
+                uuids.push(uuid);
+            }
         }
     }
 
@@ -600,6 +607,43 @@ mod tests {
         let bytes = serialize_header(&header);
         let parsed = parse_header(&bytes).unwrap();
         assert!(!parsed.recovery_enabled());
+    }
+
+    #[test]
+    fn test_add_tags_no_duplicates_when_called_twice() {
+        let mut index = VaultIndex::new();
+        let uuid = [0xAA; 16];
+        let tags = vec!["rust".to_string(), "security".to_string()];
+        index.add_tags(uuid, &tags);
+        // Calling a second time with the same uuid/tags must not produce duplicates.
+        index.add_tags(uuid, &tags);
+        for tag in &tags {
+            let uuids = index.tag_index.get(tag).unwrap();
+            assert_eq!(uuids.len(), 1, "tag '{tag}' should contain exactly one UUID");
+        }
+    }
+
+    #[test]
+    fn test_add_tags_deduplicates_within_entry_tags() {
+        let mut index = VaultIndex::new();
+        let uuid = [0xBB; 16];
+        // Entry whose tag list already contains a duplicate.
+        let tags = vec!["rust".to_string(), "rust".to_string()];
+        index.add_tags(uuid, &tags);
+        let uuids = index.tag_index.get("rust").unwrap();
+        assert_eq!(uuids.len(), 1, "duplicate tag in input must not produce duplicate UUID");
+    }
+
+    #[test]
+    fn test_add_tags_different_uuids_same_tag() {
+        let mut index = VaultIndex::new();
+        let uuid1 = [0x01; 16];
+        let uuid2 = [0x02; 16];
+        let tags = vec!["rust".to_string()];
+        index.add_tags(uuid1, &tags);
+        index.add_tags(uuid2, &tags);
+        let uuids = index.tag_index.get("rust").unwrap();
+        assert_eq!(uuids.len(), 2, "two distinct UUIDs for the same tag should both be present");
     }
 
     #[test]
