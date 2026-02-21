@@ -18,8 +18,13 @@ pub struct GetCmd {
 }
 
 /// Execute the get command.
-pub fn run(cmd: GetCmd, vault_path: &str, fmt: &OutputFormatter) -> anyhow::Result<()> {
-    let vault = open_vault_with_session(vault_path)?;
+pub fn run(
+    cmd: GetCmd,
+    vault_path: &str,
+    fmt: &OutputFormatter,
+    no_session: bool,
+) -> anyhow::Result<()> {
+    let vault = open_vault_with_session(vault_path, no_session)?;
 
     // Try UUID parse first, then search by name
     let entries = search_by_name(&vault, &cmd.name)?;
@@ -61,7 +66,10 @@ pub fn run(cmd: GetCmd, vault_path: &str, fmt: &OutputFormatter) -> anyhow::Resu
         }
         match &entry.data {
             padlock_core::entries::EntryData::Credential {
-                username, password, url, notes,
+                username,
+                password,
+                url,
+                notes,
             } => {
                 fmt.key_value("Username", username);
                 fmt.key_value("Password", password);
@@ -73,7 +81,10 @@ pub fn run(cmd: GetCmd, vault_path: &str, fmt: &OutputFormatter) -> anyhow::Resu
                 }
             }
             padlock_core::entries::EntryData::SSHKey {
-                key_type, public_key, comment, ..
+                key_type,
+                public_key,
+                comment,
+                ..
             } => {
                 fmt.key_value("Key Type", &format!("{key_type:?}"));
                 fmt.key_value("Public Key", public_key);
@@ -82,7 +93,11 @@ pub fn run(cmd: GetCmd, vault_path: &str, fmt: &OutputFormatter) -> anyhow::Resu
                 }
             }
             padlock_core::entries::EntryData::TOTP {
-                account_name, issuer, digits, period, ..
+                account_name,
+                issuer,
+                digits,
+                period,
+                ..
             } => {
                 fmt.key_value("Account", account_name);
                 if let Some(i) = issuer {
@@ -92,7 +107,9 @@ pub fn run(cmd: GetCmd, vault_path: &str, fmt: &OutputFormatter) -> anyhow::Resu
                 fmt.key_value("Period", &format!("{period}s"));
             }
             padlock_core::entries::EntryData::Binary {
-                content_type, filename, ..
+                content_type,
+                filename,
+                ..
             } => {
                 if let Some(f) = filename {
                     fmt.key_value("Filename", f);
@@ -101,9 +118,7 @@ pub fn run(cmd: GetCmd, vault_path: &str, fmt: &OutputFormatter) -> anyhow::Resu
                     fmt.key_value("Type", ct);
                 }
             }
-            padlock_core::entries::EntryData::Netrc {
-                machine, login, ..
-            } => {
+            padlock_core::entries::EntryData::Netrc { machine, login, .. } => {
                 fmt.key_value("Machine", machine);
                 fmt.key_value("Login", login);
             }

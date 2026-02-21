@@ -10,8 +10,16 @@ use super::{prompt_passphrase, resolve_vault_path};
 #[derive(Args)]
 pub struct InitCmd {
     /// Path to the vault file.
-    #[arg(long, env = "PADLOCK_VAULT", default_value = "~/.padlock/vault.padlock")]
+    #[arg(
+        long,
+        env = "PADLOCK_VAULT",
+        default_value = "~/.padlock/vault.padlock"
+    )]
     vault_path: String,
+
+    /// Enable recovery key during initialization.
+    #[arg(long, short)]
+    recovery: bool,
 }
 
 /// Execute the init command.
@@ -39,8 +47,22 @@ pub fn run(cmd: InitCmd) -> anyhow::Result<()> {
     }
 
     let storage = FilesystemBackend::new(path.clone());
-    Vault::init(&passphrase, &storage, &KdfParams::production())?;
+    let mut vault = Vault::init(&passphrase, &storage, &KdfParams::production())?;
 
     println!("Vault initialized at {}", path.display());
+
+    if cmd.recovery {
+        let key = vault.enable_recovery(&storage)?;
+        println!();
+        println!("Recovery key enabled.");
+        println!();
+        println!("IMPORTANT: Save this recovery key in a secure location.");
+        println!("It will NOT be shown again.");
+        println!();
+        println!("  {key}");
+        println!();
+        println!("If you forget your passphrase, run `padlock recover` and enter this key.");
+    }
+
     Ok(())
 }

@@ -14,8 +14,11 @@ pub mod git;
 pub mod init;
 pub mod lock;
 pub mod ls;
+pub mod recover;
+pub mod recovery;
 pub mod rm;
 pub mod search;
+pub mod session;
 pub mod set;
 pub mod status;
 pub mod totp;
@@ -28,12 +31,9 @@ use clap::{Parser, Subcommand};
 use padlock_core::crypto::secret_buf::SecretBuf;
 use padlock_core::session::protocol::{
     self, build_extension_message, CreateSessionRequest, CreateSessionResponse,
-    ResumeSessionRequest, ResumeSessionResponse, SSH_AGENT_EXTENSION_RESPONSE,
-    PROTOCOL_VERSION,
+    ResumeSessionRequest, ResumeSessionResponse, PROTOCOL_VERSION, SSH_AGENT_EXTENSION_RESPONSE,
 };
-use padlock_core::session::transit::{
-    transit_decrypt, TransitKeyPair, X25519_PUBKEY_SIZE,
-};
+use padlock_core::session::transit::{transit_decrypt, TransitKeyPair, X25519_PUBKEY_SIZE};
 use padlock_core::session::types::{SessionAlgorithm, SessionDuration, SESSION_TOKEN_SIZE};
 use padlock_core::vault::lifecycle::{KdfParams, Vault};
 use padlock_core::vault::storage::FilesystemBackend;
@@ -44,7 +44,11 @@ use padlock_core::vault::storage::FilesystemBackend;
 #[command(version, about = "Encrypted credential manager for developers")]
 pub struct Cli {
     /// Path to the vault file.
-    #[arg(long, env = "PADLOCK_VAULT", default_value = "~/.padlock/vault.padlock")]
+    #[arg(
+        long,
+        env = "PADLOCK_VAULT",
+        default_value = "~/.padlock/vault.padlock"
+    )]
     pub vault_path: String,
 
     /// Output in JSON format.
@@ -58,6 +62,10 @@ pub struct Cli {
     /// Disable colored output.
     #[arg(long, global = true)]
     pub no_color: bool,
+
+    /// Skip session caching — always prompt for passphrase.
+    #[arg(long, global = true)]
+    pub no_session: bool,
 
     /// Subcommand to execute.
     #[command(subcommand)]
@@ -101,6 +109,12 @@ pub enum Commands {
     Audit(audit::AuditCmd),
     /// Manage configuration.
     Config(config::ConfigCmd),
+    /// Manage active sessions.
+    Session(session::SessionCmd),
+    /// Recover a vault using a recovery key.
+    Recover(recover::RecoverCmd),
+    /// Manage vault recovery key.
+    Recovery(recovery::RecoveryCmd),
 }
 
 /// Resolve the vault path, expanding ~ to the home directory.
@@ -115,7 +129,8 @@ pub fn resolve_vault_path(path: &str) -> PathBuf {
 
 /// Prompt for the vault passphrase.
 pub fn prompt_passphrase(prompt: &str) -> anyhow::Result<String> {
-    rpassword::prompt_password(prompt).map_err(|e| anyhow::anyhow!("failed to read passphrase: {e}"))
+    rpassword::prompt_password(prompt)
+        .map_err(|e| anyhow::anyhow!("failed to read passphrase: {e}"))
 }
 
 /// Get the padlock directory from the vault path.
@@ -132,14 +147,14 @@ fn session_token_path(vault_path: &str) -> PathBuf {
 }
 
 /// Get the agent socket path.
-fn agent_socket_path_for_session(vault_path: &str) -> PathBuf {
+pub(crate) fn agent_socket_path_for_session(vault_path: &str) -> PathBuf {
     padlock_dir(vault_path).join("agent.sock")
 }
 
 /// Read a session token from the environment or token file.
 ///
 /// Lookup order: PADLOCK_SESSION env var -> ~/.padlock/session.token file
-fn read_session_token(vault_path: &str) -> Option<[u8; SESSION_TOKEN_SIZE]> {
+pub(crate) fn read_session_token(vault_path: &str) -> Option<[u8; SESSION_TOKEN_SIZE]> {
     // Check environment variable first
     if let Ok(hex_str) = std::env::var("PADLOCK_SESSION") {
         if let Some(bytes) = hex_decode_32(&hex_str) {
@@ -210,7 +225,9 @@ fn try_resume_session(vault_path: &str) -> Option<(SecretBuf, SecretBuf)> {
     let message = build_extension_message(&session_payload);
 
     let mut stream = std::os::unix::net::UnixStream::connect(&socket).ok()?;
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok()?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .ok()?;
     stream.write_all(&message).ok()?;
 
     // Read response
@@ -269,6 +286,7 @@ fn create_daemon_session(
     mackey: &SecretBuf,
     vault_id: &[u8; 16],
     duration: SessionDuration,
+    idle_timeout_secs: u64,
 ) -> Option<Vec<u8>> {
     let socket = agent_socket_path_for_session(vault_path);
     if !socket.exists() {
@@ -284,13 +302,16 @@ fn create_daemon_session(
         ephemeral_pubkey: vec![0u8; 32],
         duration: duration.as_label().to_string(),
         vault_id: vault_id.to_vec(),
+        idle_timeout_secs,
     };
 
     let session_payload = protocol::build_create_request(&req).ok()?;
     let message = build_extension_message(&session_payload);
 
     let mut stream = std::os::unix::net::UnixStream::connect(&socket).ok()?;
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok()?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .ok()?;
     stream.write_all(&message).ok()?;
 
     // Read response
@@ -356,21 +377,84 @@ pub fn destroy_daemon_session(vault_path: &str, token: Option<&[u8; SESSION_TOKE
     }
 }
 
+/// Ensure the agent daemon is running, auto-starting it if necessary.
+///
+/// Returns `true` if the daemon is running (or was started successfully).
+pub(crate) fn ensure_daemon_running(vault_path: &str) -> bool {
+    let socket = agent_socket_path_for_session(vault_path);
+
+    // Check if socket exists and is connectable
+    if socket.exists() {
+        if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+            return true;
+        }
+        // Stale socket — remove it
+        let _ = std::fs::remove_file(&socket);
+    }
+
+    // Auto-start the daemon as a background process
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+
+    // Remove stale PID file before spawning to prevent the child
+    // from detecting itself via is_agent_running()
+    let pid_path = padlock_dir(vault_path).join("agent.pid");
+    let _ = std::fs::remove_file(&pid_path);
+
+    let child = std::process::Command::new(&exe)
+        .arg("--vault-path")
+        .arg(vault_path)
+        .arg("agent")
+        .arg("start")
+        .arg("--foreground")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+
+    if let Ok(_child) = child {
+        // Do NOT write PID file here — the child writes it in run_agent_foreground()
+        // after binding the socket. Writing it here causes a race where the child
+        // reads its own PID and exits thinking an agent is already running.
+
+        // Poll for socket existence with 100ms intervals, max 3 seconds
+        for _ in 0..30 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if socket.exists() {
+                if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
 /// Open a vault, trying session cache first, then falling back to passphrase.
 ///
 /// If a session is successfully resumed, returns the vault without prompting.
 /// If no valid session exists, prompts for passphrase and optionally creates
 /// a session for future use.
-pub fn open_vault_with_session(vault_path: &str) -> anyhow::Result<Vault> {
+///
+/// When `no_session` is true, session caching is bypassed entirely.
+pub fn open_vault_with_session(vault_path: &str, no_session: bool) -> anyhow::Result<Vault> {
     let path = resolve_vault_path(vault_path);
     let storage = FilesystemBackend::new(path);
 
-    // Try to resume from session cache
-    if let Some((kek, mackey)) = try_resume_session(vault_path) {
-        match Vault::open_with_keys(kek, mackey, &storage) {
-            Ok(vault) => return Ok(vault),
-            Err(_) => {
-                // Session keys are stale, fall through to passphrase
+    if !no_session {
+        // Ensure daemon is running before trying to resume
+        ensure_daemon_running(vault_path);
+
+        // Try to resume from session cache
+        if let Some((kek, mackey)) = try_resume_session(vault_path) {
+            match Vault::open_with_keys(kek, mackey, &storage) {
+                Ok(vault) => return Ok(vault),
+                Err(_) => {
+                    // Session keys are stale, fall through to passphrase
+                }
             }
         }
     }
@@ -379,17 +463,21 @@ pub fn open_vault_with_session(vault_path: &str) -> anyhow::Result<Vault> {
     let passphrase = prompt_passphrase("Passphrase: ")?;
     let vault = Vault::open(&passphrase, &storage, &KdfParams::production())?;
 
-    // Try to create a session for next time
-    if let (Ok(kek), Ok(mackey)) = (vault.kek(), vault.mackey()) {
-        let vault_id = vault.header().vault_uuid;
-        if let Some(token) = create_daemon_session(
-            vault_path,
-            kek,
-            mackey,
-            &vault_id,
-            SessionDuration::OneHour,
-        ) {
-            let _ = save_session_token(vault_path, &token);
+    // Try to create a session for next time (respecting config)
+    if !no_session {
+        let cfg = config::load_config(vault_path).unwrap_or_default();
+        if cfg.session.auto_session {
+            ensure_daemon_running(vault_path);
+            if let (Ok(kek), Ok(mackey)) = (vault.kek(), vault.mackey()) {
+                let vault_id = vault.header().vault_uuid;
+                let duration = cfg.session.parsed_duration();
+                let idle_secs = cfg.session.parsed_idle_timeout().as_secs();
+                if let Some(token) =
+                    create_daemon_session(vault_path, kek, mackey, &vault_id, duration, idle_secs)
+                {
+                    let _ = save_session_token(vault_path, &token);
+                }
+            }
         }
     }
 
@@ -397,16 +485,25 @@ pub fn open_vault_with_session(vault_path: &str) -> anyhow::Result<Vault> {
 }
 
 /// Open a vault mutably, trying session cache first.
-pub fn open_vault_mut_with_session(vault_path: &str) -> anyhow::Result<(Vault, FilesystemBackend)> {
+///
+/// When `no_session` is true, session caching is bypassed entirely.
+pub fn open_vault_mut_with_session(
+    vault_path: &str,
+    no_session: bool,
+) -> anyhow::Result<(Vault, FilesystemBackend)> {
     let path = resolve_vault_path(vault_path);
     let storage = FilesystemBackend::new(path);
 
-    // Try to resume from session cache
-    if let Some((kek, mackey)) = try_resume_session(vault_path) {
-        match Vault::open_with_keys(kek, mackey, &storage) {
-            Ok(vault) => return Ok((vault, storage)),
-            Err(_) => {
-                // Fall through
+    if !no_session {
+        ensure_daemon_running(vault_path);
+
+        // Try to resume from session cache
+        if let Some((kek, mackey)) = try_resume_session(vault_path) {
+            match Vault::open_with_keys(kek, mackey, &storage) {
+                Ok(vault) => return Ok((vault, storage)),
+                Err(_) => {
+                    // Fall through
+                }
             }
         }
     }
@@ -414,17 +511,21 @@ pub fn open_vault_mut_with_session(vault_path: &str) -> anyhow::Result<(Vault, F
     let passphrase = prompt_passphrase("Passphrase: ")?;
     let vault = Vault::open(&passphrase, &storage, &KdfParams::production())?;
 
-    // Try to create a session
-    if let (Ok(kek), Ok(mackey)) = (vault.kek(), vault.mackey()) {
-        let vault_id = vault.header().vault_uuid;
-        if let Some(token) = create_daemon_session(
-            vault_path,
-            kek,
-            mackey,
-            &vault_id,
-            SessionDuration::OneHour,
-        ) {
-            let _ = save_session_token(vault_path, &token);
+    // Try to create a session (respecting config)
+    if !no_session {
+        let cfg = config::load_config(vault_path).unwrap_or_default();
+        if cfg.session.auto_session {
+            ensure_daemon_running(vault_path);
+            if let (Ok(kek), Ok(mackey)) = (vault.kek(), vault.mackey()) {
+                let vault_id = vault.header().vault_uuid;
+                let duration = cfg.session.parsed_duration();
+                let idle_secs = cfg.session.parsed_idle_timeout().as_secs();
+                if let Some(token) =
+                    create_daemon_session(vault_path, kek, mackey, &vault_id, duration, idle_secs)
+                {
+                    let _ = save_session_token(vault_path, &token);
+                }
+            }
         }
     }
 

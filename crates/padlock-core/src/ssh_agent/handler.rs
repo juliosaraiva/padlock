@@ -8,25 +8,33 @@ use std::sync::Arc;
 
 use crate::session::manager::SessionStore;
 use crate::session::protocol::{
-    self, CreateSessionRequest, CreateSessionResponse, DestroySessionRequest,
-    ResumeSessionRequest, ResumeSessionResponse, SessionRequest, SessionResponse,
-    StatusSessionRequest, SESSION_EXTENSION_NAME,
+    self, CreateSessionRequest, CreateSessionResponse, DestroySessionRequest, ResumeSessionRequest,
+    ResumeSessionResponse, SessionRequest, SessionResponse, StatusSessionRequest,
+    SESSION_EXTENSION_NAME,
 };
 use crate::session::transit::{responder_derive_transit, transit_encrypt};
-use crate::session::types::{SessionAlgorithm, SessionDuration, SESSION_TOKEN_SIZE};
+use crate::session::types::{
+    SessionAlgorithm, SessionDuration, DEFAULT_IDLE_TIMEOUT, SESSION_TOKEN_SIZE,
+};
 use crate::ssh_agent::protocol::{AgentMessage, AgentResponse};
 use crate::traits::session::SessionManager;
 
 /// An SSH key identity loaded in the agent.
-#[derive(Debug, Clone)]
+///
+/// Private key bytes are zeroized on drop to prevent key material
+/// from lingering in deallocated heap memory.
+#[derive(Debug, Clone, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct LoadedKey {
     /// The public key blob in OpenSSH wire format.
+    #[zeroize(skip)]
     pub public_key_blob: Vec<u8>,
     /// Human-readable comment for the key.
+    #[zeroize(skip)]
     pub comment: String,
-    /// The private key bytes (used for signing, zeroized after).
+    /// The private key bytes (used for signing). Zeroized on drop.
     pub private_key_bytes: Vec<u8>,
     /// The key type string (e.g., "ssh-ed25519").
+    #[zeroize(skip)]
     pub key_type: String,
 }
 
@@ -192,11 +200,20 @@ impl AgentHandler {
         let kek = crate::crypto::secret_buf::SecretBuf::from_bytes(&req.encrypted_kek);
         let mackey = crate::crypto::secret_buf::SecretBuf::from_bytes(&req.encrypted_mackey);
 
-        // Create session
-        let token = match store.create_session(&kek, &mackey, &vault_id, duration, algorithm) {
-            Ok(t) => t,
-            Err(_) => return AgentResponse::Failure,
+        // Parse idle timeout from request, falling back to default
+        let idle_timeout = if req.idle_timeout_secs > 0 {
+            std::time::Duration::from_secs(req.idle_timeout_secs)
+        } else {
+            DEFAULT_IDLE_TIMEOUT
         };
+
+        // Create session
+        let token =
+            match store.create_session(&kek, &mackey, &vault_id, duration, idle_timeout, algorithm)
+            {
+                Ok(t) => t,
+                Err(_) => return AgentResponse::Failure,
+            };
 
         let resp = CreateSessionResponse {
             token: token.as_bytes().to_vec(),
@@ -277,12 +294,10 @@ impl AgentHandler {
         };
 
         match store.destroy_session(&token) {
-            Ok(()) => {
-                match protocol::serialize_session_response(&SessionResponse::Success) {
-                    Ok(payload) => AgentResponse::ExtensionResponse { payload },
-                    Err(_) => AgentResponse::Failure,
-                }
-            }
+            Ok(()) => match protocol::serialize_session_response(&SessionResponse::Success) {
+                Ok(payload) => AgentResponse::ExtensionResponse { payload },
+                Err(_) => AgentResponse::Failure,
+            },
             Err(_) => AgentResponse::Failure,
         }
     }
@@ -317,12 +332,10 @@ impl AgentHandler {
     /// Handle a DestroyAll request.
     fn handle_session_destroy_all(&self, store: &SessionStore) -> AgentResponse {
         match store.destroy_all_sessions() {
-            Ok(()) => {
-                match protocol::serialize_session_response(&SessionResponse::Success) {
-                    Ok(payload) => AgentResponse::ExtensionResponse { payload },
-                    Err(_) => AgentResponse::Failure,
-                }
-            }
+            Ok(()) => match protocol::serialize_session_response(&SessionResponse::Success) {
+                Ok(payload) => AgentResponse::ExtensionResponse { payload },
+                Err(_) => AgentResponse::Failure,
+            },
             Err(_) => AgentResponse::Failure,
         }
     }
@@ -524,7 +537,10 @@ mod tests {
             flags: 0,
         });
 
-        if let AgentResponse::SignResponse { signature: sig_blob } = response {
+        if let AgentResponse::SignResponse {
+            signature: sig_blob,
+        } = response
+        {
             // Parse the SSH signature blob to extract raw signature
             // Format: string "ssh-ed25519" + string signature_bytes
             let type_len = u32::from_be_bytes(sig_blob[0..4].try_into().unwrap()) as usize;

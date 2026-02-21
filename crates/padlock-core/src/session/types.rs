@@ -5,7 +5,7 @@
 //! derivation for a user-configurable duration.
 
 use std::fmt;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -124,6 +124,26 @@ impl fmt::Display for SessionDuration {
     }
 }
 
+/// Parse a human-readable idle timeout string into a `Duration`.
+///
+/// Supports formats: "5m", "10m", "15m", "30m", "1h", "2h".
+/// Returns `None` for unrecognized strings.
+#[must_use]
+pub fn parse_idle_timeout(s: &str) -> Option<Duration> {
+    match s {
+        "5m" => Some(Duration::from_secs(300)),
+        "10m" => Some(Duration::from_secs(600)),
+        "15m" => Some(Duration::from_secs(900)),
+        "30m" => Some(Duration::from_secs(1800)),
+        "1h" => Some(Duration::from_secs(3600)),
+        "2h" => Some(Duration::from_secs(7200)),
+        _ => None,
+    }
+}
+
+/// Default idle timeout: 15 minutes.
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(900);
+
 /// Opaque session token — 256-bit random, stored in a `SecretBuf`.
 ///
 /// The token is used by clients to resume an existing session.
@@ -205,6 +225,10 @@ pub struct Session {
     pub created_at: Instant,
     /// When the session expires (monotonic).
     pub expires_at: Instant,
+    /// Idle timeout duration — session expires if unused for this long.
+    pub idle_timeout: Duration,
+    /// Last time this session was accessed (monotonic, reset on each use).
+    pub last_accessed: Instant,
     /// Wall-clock creation time (for audit logging only).
     pub created_at_wall: Timestamp,
     /// Number of times this session has been used.
@@ -239,6 +263,8 @@ pub struct SessionInfo {
     pub vault_id: String,
     /// Whether the session is still valid.
     pub valid: bool,
+    /// Idle timeout in seconds.
+    pub idle_timeout_secs: u64,
 }
 
 /// Hex-encode a byte slice (lowercase).
@@ -317,5 +343,24 @@ mod tests {
     #[test]
     fn test_session_algorithm_unknown_byte() {
         assert_eq!(SessionAlgorithm::from_byte(255), None);
+    }
+
+    #[test]
+    fn test_parse_idle_timeout_valid() {
+        assert_eq!(parse_idle_timeout("5m"), Some(Duration::from_secs(300)));
+        assert_eq!(parse_idle_timeout("15m"), Some(Duration::from_secs(900)));
+        assert_eq!(parse_idle_timeout("30m"), Some(Duration::from_secs(1800)));
+        assert_eq!(parse_idle_timeout("1h"), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn test_parse_idle_timeout_invalid() {
+        assert_eq!(parse_idle_timeout("99m"), None);
+        assert_eq!(parse_idle_timeout("abc"), None);
+    }
+
+    #[test]
+    fn test_default_idle_timeout_is_15_minutes() {
+        assert_eq!(DEFAULT_IDLE_TIMEOUT, Duration::from_secs(900));
     }
 }

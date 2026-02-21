@@ -9,9 +9,8 @@ use crate::error::{EntryError, Error};
 ///
 /// Returns `EntryError::SerializationFailed` if encoding fails.
 pub fn serialize_entry(entry: &Entry) -> crate::error::Result<Vec<u8>> {
-    rmp_serde::to_vec(entry).map_err(|e| {
-        Error::Entry(EntryError::SerializationFailed(e.to_string()))
-    })
+    rmp_serde::to_vec(entry)
+        .map_err(|e| Error::Entry(EntryError::SerializationFailed(e.to_string())))
 }
 
 /// Deserialize an entry from MessagePack bytes.
@@ -20,9 +19,8 @@ pub fn serialize_entry(entry: &Entry) -> crate::error::Result<Vec<u8>> {
 ///
 /// Returns `EntryError::DeserializationFailed` if decoding fails.
 pub fn deserialize_entry(data: &[u8]) -> crate::error::Result<Entry> {
-    rmp_serde::from_slice(data).map_err(|e| {
-        Error::Entry(EntryError::DeserializationFailed(e.to_string()))
-    })
+    rmp_serde::from_slice(data)
+        .map_err(|e| Error::Entry(EntryError::DeserializationFailed(e.to_string())))
 }
 
 #[cfg(test)]

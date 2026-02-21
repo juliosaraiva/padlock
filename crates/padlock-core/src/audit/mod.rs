@@ -151,9 +151,10 @@ impl std::fmt::Debug for JsonLinesAuditLog {
 
 impl AuditLogger for JsonLinesAuditLog {
     fn log_event(&self, event: &AuditEvent) -> Result<()> {
-        let _guard = self._lock.lock().map_err(|e| {
-            crate::error::Error::Config(format!("audit log lock poisoned: {e}"))
-        })?;
+        let _guard = self
+            ._lock
+            .lock()
+            .map_err(|e| crate::error::Error::Config(format!("audit log lock poisoned: {e}")))?;
 
         let mut file = OpenOptions::new()
             .create(true)
@@ -207,13 +208,7 @@ mod tests {
     #[test]
     fn test_log_vault_operation_success() {
         let logger = InMemoryAuditLog::new();
-        let result = log_vault_operation(
-            &logger,
-            AuditAction::VaultInit,
-            None,
-            true,
-            None,
-        );
+        let result = log_vault_operation(&logger, AuditAction::VaultInit, None, true, None);
         assert!(result.is_ok());
     }
 

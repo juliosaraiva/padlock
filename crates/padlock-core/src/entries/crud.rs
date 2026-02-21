@@ -35,23 +35,20 @@ pub fn create_entry(
     }
 
     let mut entry = Entry::new(name.clone(), data);
-    entry.tags = tags;
+    entry.tags = tags.clone();
 
     // Serialize and encrypt
     let serialized = serialize_entry(&entry)?;
     let encrypted = crate::vault::entries::encrypt_entry(&serialized, &kek)?;
 
-    // Append to entries blob
-    let mut blob = vault.entries_blob().to_vec();
-    let offset = blob.len() as u64;
-    let length = encrypted.len() as u32;
-    blob.extend_from_slice(&encrypted);
-    vault.set_entries_blob(blob)?;
+    // Append to entries blob in place (avoids full-blob copy)
+    let (offset, length) = vault.append_to_entries_blob(&encrypted)?;
 
     // Update index
     let now = Timestamp::now().as_epoch_secs() as u64;
     let uuid = *entry.id.as_bytes();
-    vault.index_mut()?.entries.insert(
+    let index = vault.index_mut()?;
+    index.entries.insert(
         uuid,
         EntryMetadata {
             uuid,
@@ -61,8 +58,12 @@ pub fn create_entry(
             modified_at: now,
             deleted: false,
             title: name,
+            tags: tags.clone(),
         },
     );
+
+    // Maintain tag index
+    index.add_tags(uuid, &tags);
 
     Ok(entry)
 }
@@ -122,20 +123,31 @@ pub fn update_entry(
     let serialized = serialize_entry(&entry)?;
     let encrypted = crate::vault::entries::encrypt_entry(&serialized, &kek)?;
 
-    // Append new version to blob (old data becomes dead space)
-    let mut blob = vault.entries_blob().to_vec();
-    let offset = blob.len() as u64;
-    let length = encrypted.len() as u32;
-    blob.extend_from_slice(&encrypted);
-    vault.set_entries_blob(blob)?;
+    // Append new version to blob in place (old data becomes dead space)
+    let (offset, length) = vault.append_to_entries_blob(&encrypted)?;
 
-    // Update index
+    // Update index and tag index
     let uuid = *id.as_bytes();
-    if let Some(meta) = vault.index_mut()?.entries.get_mut(&uuid) {
+    let new_tags = entry.tags.clone();
+
+    let index = vault.index_mut()?;
+
+    // Extract old tags first to avoid borrow conflict
+    let old_tags = index
+        .entries
+        .get(&uuid)
+        .map(|m| m.tags.clone())
+        .unwrap_or_default();
+    index.remove_tags(&uuid, &old_tags);
+
+    if let Some(meta) = index.entries.get_mut(&uuid) {
         meta.entry_offset = offset;
         meta.entry_length = length;
         meta.modified_at = Timestamp::now().as_epoch_secs() as u64;
+        meta.tags = new_tags.clone();
     }
+
+    index.add_tags(uuid, &new_tags);
 
     Ok(entry)
 }
@@ -152,8 +164,8 @@ pub fn update_entry(
 pub fn delete_entry(vault: &mut Vault, id: &EntryId) -> crate::error::Result<()> {
     let uuid = *id.as_bytes();
 
-    let meta = vault
-        .index_mut()?
+    let index = vault.index_mut()?;
+    let meta = index
         .entries
         .get_mut(&uuid)
         .filter(|m| !m.deleted)
@@ -161,6 +173,10 @@ pub fn delete_entry(vault: &mut Vault, id: &EntryId) -> crate::error::Result<()>
 
     meta.deleted = true;
     meta.modified_at = Timestamp::now().as_epoch_secs() as u64;
+
+    // Remove from tag index
+    let tags = meta.tags.clone();
+    index.remove_tags(&uuid, &tags);
     Ok(())
 }
 
@@ -180,9 +196,33 @@ pub fn list_entries(vault: &Vault) -> crate::error::Result<Vec<(EntryId, String)
         .entries
         .values()
         .filter(|m| !m.deleted)
-        .map(|m| (EntryId::from_uuid(uuid::Uuid::from_bytes(m.uuid)), m.title.clone()))
+        .map(|m| {
+            (
+                EntryId::from_uuid(uuid::Uuid::from_bytes(m.uuid)),
+                m.title.clone(),
+            )
+        })
         .collect();
     Ok(entries)
+}
+
+/// Case-insensitive substring check without allocating.
+///
+/// Uses ASCII case folding, which is sufficient for entry titles.
+fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let needle_bytes: Vec<u8> = needle.bytes().map(|b| b.to_ascii_lowercase()).collect();
+    haystack
+        .as_bytes()
+        .windows(needle_bytes.len())
+        .any(|window| {
+            window
+                .iter()
+                .zip(needle_bytes.iter())
+                .all(|(a, b)| a.to_ascii_lowercase() == *b)
+        })
 }
 
 /// Search entries by name (case-insensitive substring match).
@@ -192,14 +232,13 @@ pub fn list_entries(vault: &Vault) -> crate::error::Result<Vec<(EntryId, String)
 /// Returns `VaultError::Locked` if the vault is not unlocked.
 pub fn search_by_name(vault: &Vault, query: &str) -> crate::error::Result<Vec<Entry>> {
     let kek = vault.kek()?;
-    let query_lower = query.to_lowercase();
     let mut results = Vec::new();
 
     for meta in vault.index().entries.values() {
         if meta.deleted {
             continue;
         }
-        if meta.title.to_lowercase().contains(&query_lower) {
+        if contains_case_insensitive(&meta.title, query) {
             let offset = meta.entry_offset as usize;
             let length = meta.entry_length as usize;
             let blob = vault.entries_blob();
@@ -218,8 +257,9 @@ pub fn search_by_name(vault: &Vault, query: &str) -> crate::error::Result<Vec<En
 
 /// Search entries by tag.
 ///
-/// Returns all entries that have the specified tag. Requires
-/// decrypting entries to check tags.
+/// Uses the tag index for O(1) lookup if available, otherwise falls
+/// back to decrypting entries. Tags are compared case-insensitively
+/// using `eq_ignore_ascii_case` to avoid per-tag allocations.
 ///
 /// # Errors
 ///
@@ -227,8 +267,39 @@ pub fn search_by_name(vault: &Vault, query: &str) -> crate::error::Result<Vec<En
 pub fn search_by_tag(vault: &Vault, tag: &str) -> crate::error::Result<Vec<Entry>> {
     let kek = vault.kek()?;
     let tag_lower = tag.to_lowercase();
-    let mut results = Vec::new();
 
+    // Fast path: use the tag index if available
+    if !vault.index().tag_index.is_empty() {
+        let uuids = match vault.index().tag_index.get(&tag_lower) {
+            Some(ids) => ids.clone(),
+            None => return Ok(Vec::new()),
+        };
+
+        let mut results = Vec::with_capacity(uuids.len());
+        for uuid in &uuids {
+            let meta = vault.index().entries.get(uuid);
+            if let Some(m) = meta {
+                if m.deleted {
+                    continue;
+                }
+                let offset = m.entry_offset as usize;
+                let length = m.entry_length as usize;
+                let blob = vault.entries_blob();
+                if offset + length <= blob.len() {
+                    let encrypted = &blob[offset..offset + length];
+                    if let Ok(decrypted) = crate::vault::entries::decrypt_entry(encrypted, kek) {
+                        if let Ok(entry) = deserialize_entry(&decrypted) {
+                            results.push(entry);
+                        }
+                    }
+                }
+            }
+        }
+        return Ok(results);
+    }
+
+    // Slow path: decrypt all entries and check tags
+    let mut results = Vec::new();
     for meta in vault.index().entries.values() {
         if meta.deleted {
             continue;
@@ -240,7 +311,11 @@ pub fn search_by_tag(vault: &Vault, tag: &str) -> crate::error::Result<Vec<Entry
             let encrypted = &blob[offset..offset + length];
             if let Ok(decrypted) = crate::vault::entries::decrypt_entry(encrypted, kek) {
                 if let Ok(entry) = deserialize_entry(&decrypted) {
-                    if entry.tags.iter().any(|t| t.to_lowercase() == tag_lower) {
+                    if entry
+                        .tags
+                        .iter()
+                        .any(|t| t.eq_ignore_ascii_case(&tag_lower))
+                    {
                         results.push(entry);
                     }
                 }
@@ -276,7 +351,9 @@ mod tests {
         }
         fn read_vault(&self) -> crate::error::Result<Vec<u8>> {
             self.data.lock().unwrap().clone().ok_or_else(|| {
-                Error::Vault(VaultError::NotFound { path: "<mem>".to_string() })
+                Error::Vault(VaultError::NotFound {
+                    path: "<mem>".to_string(),
+                })
             })
         }
         fn vault_exists(&self) -> crate::error::Result<bool> {

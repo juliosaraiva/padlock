@@ -22,5 +22,6 @@ pub mod types;
 
 pub use manager::SessionStore;
 pub use types::{
-    Session, SessionAlgorithm, SessionDuration, SessionInfo, SessionToken, SESSION_TOKEN_SIZE,
+    parse_idle_timeout, Session, SessionAlgorithm, SessionDuration, SessionInfo, SessionToken,
+    DEFAULT_IDLE_TIMEOUT, SESSION_TOKEN_SIZE,
 };

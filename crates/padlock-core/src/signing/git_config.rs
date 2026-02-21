@@ -70,7 +70,11 @@ fn run_git_config(scope_flag: &str, key: &str, value: &str) -> crate::error::Res
         .arg(key)
         .arg(value)
         .output()
-        .map_err(|e| Error::Signing(SigningError::Failed(format!("failed to run git config: {e}"))))?;
+        .map_err(|e| {
+            Error::Signing(SigningError::Failed(format!(
+                "failed to run git config: {e}"
+            )))
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -95,7 +99,11 @@ pub fn get_git_config(key: &str) -> crate::error::Result<Option<String>> {
         .arg("--get")
         .arg(key)
         .output()
-        .map_err(|e| Error::Signing(SigningError::Failed(format!("failed to run git config: {e}"))))?;
+        .map_err(|e| {
+            Error::Signing(SigningError::Failed(format!(
+                "failed to run git config: {e}"
+            )))
+        })?;
 
     if output.status.success() {
         let value = String::from_utf8_lossy(&output.stdout).trim().to_string();

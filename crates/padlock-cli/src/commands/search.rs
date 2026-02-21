@@ -19,8 +19,13 @@ pub struct SearchCmd {
 }
 
 /// Execute the search command.
-pub fn run(cmd: SearchCmd, vault_path: &str, fmt: &OutputFormatter) -> anyhow::Result<()> {
-    let vault = open_vault_with_session(vault_path)?;
+pub fn run(
+    cmd: SearchCmd,
+    vault_path: &str,
+    fmt: &OutputFormatter,
+    no_session: bool,
+) -> anyhow::Result<()> {
+    let vault = open_vault_with_session(vault_path, no_session)?;
 
     let entries = if cmd.tag {
         search_by_tag(&vault, &cmd.query)?
@@ -56,7 +61,11 @@ pub fn run(cmd: SearchCmd, vault_path: &str, fmt: &OutputFormatter) -> anyhow::R
         println!(
             "\n{} {}.",
             entries.len().to_string().bold(),
-            if entries.len() == 1 { "result" } else { "results" }
+            if entries.len() == 1 {
+                "result"
+            } else {
+                "results"
+            }
         );
     }
 

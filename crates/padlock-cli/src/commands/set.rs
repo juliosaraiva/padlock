@@ -34,8 +34,8 @@ pub struct SetCmd {
 }
 
 /// Execute the set command.
-pub fn run(cmd: SetCmd, vault_path: &str) -> anyhow::Result<()> {
-    let (mut vault, storage) = open_vault_mut_with_session(vault_path)?;
+pub fn run(cmd: SetCmd, vault_path: &str, no_session: bool) -> anyhow::Result<()> {
+    let (mut vault, storage) = open_vault_mut_with_session(vault_path, no_session)?;
 
     let password = match cmd.password {
         Some(p) => p,

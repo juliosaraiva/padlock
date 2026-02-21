@@ -81,7 +81,7 @@ fn agent_pid_path(vault_path: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/tmp/padlock-agent.pid"))
 }
 
-/// Check if the agent is running by checking the PID file and process.
+/// Check if the agent is running by checking the PID file, process, and socket.
 fn is_agent_running(vault_path: &str) -> bool {
     let pid_path = agent_pid_path(vault_path);
     if !pid_path.exists() {
@@ -89,10 +89,7 @@ fn is_agent_running(vault_path: &str) -> bool {
     }
     if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
         if let Ok(pid) = pid_str.trim().parse::<u32>() {
-            // Check if process exists by trying to connect to socket
-            // or checking /proc on Linux. Use a portable approach:
-            // try to send signal 0 via std::process::Command.
-            return std::process::Command::new("kill")
+            let process_alive = std::process::Command::new("kill")
                 .arg("-0")
                 .arg(pid.to_string())
                 .stdout(std::process::Stdio::null())
@@ -100,6 +97,14 @@ fn is_agent_running(vault_path: &str) -> bool {
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
+            if !process_alive {
+                return false;
+            }
+            // Also verify socket is connectable (process could be unrelated
+            // or the child may not have bound the socket yet)
+            let socket_path = agent_socket_path(vault_path);
+            return socket_path.exists()
+                && std::os::unix::net::UnixStream::connect(&socket_path).is_ok();
         }
     }
     false
@@ -121,7 +126,7 @@ fn run_start(cmd: AgentStartCmd, vault_path: &str, json: bool) -> anyhow::Result
     let socket_path = agent_socket_path(vault_path);
     let pid_path = agent_pid_path(vault_path);
 
-    if is_agent_running(vault_path) {
+    if !cmd.foreground && is_agent_running(vault_path) {
         if json {
             println!(
                 "{}",
@@ -218,9 +223,9 @@ async fn run_agent_foreground(
     // Create session store for caching vault keys
     let session_store = Arc::new(SessionStore::new());
 
-    let handler = std::sync::Arc::new(std::sync::Mutex::new(
-        AgentHandler::with_session_store(session_store.clone()),
-    ));
+    let handler = std::sync::Arc::new(std::sync::Mutex::new(AgentHandler::with_session_store(
+        session_store.clone(),
+    )));
 
     eprintln!("Padlock SSH agent listening on {}", socket_path.display());
 
@@ -451,14 +456,12 @@ fn run_list(vault_path: &str, json: bool) -> anyhow::Result<()> {
             if offset + 4 > resp_buf.len() {
                 break;
             }
-            let blob_len =
-                u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
+            let blob_len = u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
             offset += 4 + blob_len;
             if offset + 4 > resp_buf.len() {
                 break;
             }
-            let comment_len =
-                u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
+            let comment_len = u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
             offset += 4;
             if offset + comment_len > resp_buf.len() {
                 break;
@@ -480,14 +483,12 @@ fn run_list(vault_path: &str, json: bool) -> anyhow::Result<()> {
             if offset + 4 > resp_buf.len() {
                 break;
             }
-            let blob_len =
-                u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
+            let blob_len = u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
             offset += 4 + blob_len;
             if offset + 4 > resp_buf.len() {
                 break;
             }
-            let comment_len =
-                u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
+            let comment_len = u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
             offset += 4;
             if offset + comment_len > resp_buf.len() {
                 break;

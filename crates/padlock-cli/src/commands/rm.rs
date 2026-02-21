@@ -17,8 +17,8 @@ pub struct RmCmd {
 }
 
 /// Execute the rm command.
-pub fn run(cmd: RmCmd, vault_path: &str) -> anyhow::Result<()> {
-    let (mut vault, storage) = open_vault_mut_with_session(vault_path)?;
+pub fn run(cmd: RmCmd, vault_path: &str, no_session: bool) -> anyhow::Result<()> {
+    let (mut vault, storage) = open_vault_mut_with_session(vault_path, no_session)?;
 
     let entries = search_by_name(&vault, &cmd.name)?;
     if entries.is_empty() {

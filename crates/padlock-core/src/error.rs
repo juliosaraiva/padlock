@@ -171,6 +171,10 @@ pub enum VaultError {
         /// Description of the write failure.
         reason: String,
     },
+
+    /// Recovery is not enabled for this vault.
+    #[error("recovery is not enabled for this vault")]
+    RecoveryNotEnabled,
 }
 
 /// Errors from entry operations.

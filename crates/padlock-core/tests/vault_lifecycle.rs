@@ -3,11 +3,11 @@
 //! Tests init, open, lock, unlock, passphrase change, and
 //! data persistence across vault reopen cycles.
 
-use padlock_core::vault::lifecycle::{KdfParams, Vault, VaultState};
-use padlock_core::vault::storage::FilesystemBackend;
+use padlock_core::types::Timestamp;
 use padlock_core::vault::entries::{decrypt_entry, encrypt_entry};
 use padlock_core::vault::format::EntryMetadata;
-use padlock_core::types::Timestamp;
+use padlock_core::vault::lifecycle::{KdfParams, Vault, VaultState};
+use padlock_core::vault::storage::FilesystemBackend;
 use tempfile::TempDir;
 
 fn test_params() -> KdfParams {
@@ -161,6 +161,7 @@ fn test_vault_reopen_preserves_entry_data() {
             modified_at: now,
             deleted: false,
             title: "admin-creds".to_string(),
+            tags: vec![],
         },
     );
     vault.set_entries_blob(encrypted).unwrap();
@@ -210,6 +211,7 @@ fn test_vault_reopen_preserves_multiple_entries() {
                 modified_at: now,
                 deleted: false,
                 title,
+                tags: vec![],
             },
         );
     }
@@ -256,6 +258,7 @@ fn test_vault_change_passphrase_new_passphrase_works() {
             modified_at: now,
             deleted: false,
             title: "secret".to_string(),
+            tags: vec![],
         },
     );
     vault.set_entries_blob(encrypted).unwrap();

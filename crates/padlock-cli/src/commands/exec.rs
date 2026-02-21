@@ -23,13 +23,13 @@ pub struct ExecCmd {
 }
 
 /// Execute the exec command.
-pub fn run(cmd: ExecCmd, vault_path: &str) -> anyhow::Result<()> {
+pub fn run(cmd: ExecCmd, vault_path: &str, no_session: bool) -> anyhow::Result<()> {
     // Parse VAR=entry_name pairs
     let mut mappings = Vec::new();
     for assignment in &cmd.assignments {
-        let (var, entry_name) = assignment
-            .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("invalid assignment '{assignment}': expected VAR=entry_name"))?;
+        let (var, entry_name) = assignment.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("invalid assignment '{assignment}': expected VAR=entry_name")
+        })?;
 
         if var.is_empty() {
             anyhow::bail!("empty variable name in assignment '{assignment}'");
@@ -42,7 +42,7 @@ pub fn run(cmd: ExecCmd, vault_path: &str) -> anyhow::Result<()> {
         anyhow::bail!("no command specified after --");
     }
 
-    let vault = open_vault_with_session(vault_path)?;
+    let vault = open_vault_with_session(vault_path, no_session)?;
 
     // Resolve each entry and extract the secret value
     let mut env_vars = Vec::new();
@@ -77,9 +77,7 @@ fn extract_secret(data: &EntryData, name: &str) -> anyhow::Result<String> {
         EntryData::TOTP { secret, .. } => Ok(secret.clone()),
         EntryData::SSHKey { private_key, .. } => Ok(private_key.clone()),
         EntryData::Netrc { password, .. } => Ok(password.clone()),
-        EntryData::Binary { data, .. } => {
-            String::from_utf8(data.clone())
-                .map_err(|_| anyhow::anyhow!("entry '{name}' contains non-UTF-8 binary data"))
-        }
+        EntryData::Binary { data, .. } => String::from_utf8(data.clone())
+            .map_err(|_| anyhow::anyhow!("entry '{name}' contains non-UTF-8 binary data")),
     }
 }

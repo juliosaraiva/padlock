@@ -30,15 +30,20 @@ pub struct TotpGenerateCmd {
 }
 
 /// Execute the totp command.
-pub fn run(cmd: TotpCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
+pub fn run(cmd: TotpCmd, vault_path: &str, json: bool, no_session: bool) -> anyhow::Result<()> {
     match cmd.command {
-        TotpSubcommand::Generate(gen) => run_generate(gen, vault_path, json),
+        TotpSubcommand::Generate(gen) => run_generate(gen, vault_path, json, no_session),
     }
 }
 
 /// Execute the totp generate subcommand.
-fn run_generate(cmd: TotpGenerateCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
-    let vault = open_vault_with_session(vault_path)?;
+fn run_generate(
+    cmd: TotpGenerateCmd,
+    vault_path: &str,
+    json: bool,
+    no_session: bool,
+) -> anyhow::Result<()> {
+    let vault = open_vault_with_session(vault_path, no_session)?;
 
     let entries = search_by_name(&vault, &cmd.name)?;
     if entries.is_empty() {

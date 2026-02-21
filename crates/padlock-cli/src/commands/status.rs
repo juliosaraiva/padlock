@@ -1,8 +1,8 @@
 //! `padlock status` command implementation.
 
 use clap::Args;
-use padlock_core::vault::storage::FilesystemBackend;
 use padlock_core::traits::storage::StorageBackend;
+use padlock_core::vault::storage::FilesystemBackend;
 
 use super::resolve_vault_path;
 use crate::output::OutputFormatter;

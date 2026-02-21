@@ -88,12 +88,10 @@ mod tests {
 
     #[test]
     fn test_generate_allowed_signers() {
-        let signers = vec![
-            AllowedSigner {
-                principal: "user@example.com".to_string(),
-                public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest".to_string(),
-            },
-        ];
+        let signers = vec![AllowedSigner {
+            principal: "user@example.com".to_string(),
+            public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest".to_string(),
+        }];
         let output = generate_allowed_signers(&signers);
         assert!(output.contains("user@example.com"));
         assert!(output.contains("ssh-ed25519"));

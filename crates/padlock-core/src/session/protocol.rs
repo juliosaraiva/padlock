@@ -78,6 +78,15 @@ pub struct CreateSessionRequest {
     pub duration: String,
     /// Vault identifier.
     pub vault_id: Vec<u8>,
+    /// Idle timeout in seconds. Session expires if unused for this long.
+    /// Defaults to 900 (15 minutes) if not present (backward compat).
+    #[serde(default = "default_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+}
+
+/// Default idle timeout for backward compatibility with older clients.
+fn default_idle_timeout_secs() -> u64 {
+    900
 }
 
 /// Response to a successful session creation.
@@ -361,6 +370,7 @@ mod tests {
             ephemeral_pubkey: vec![0; X25519_PUBKEY_SIZE],
             duration: "1h".to_string(),
             vault_id: vec![0; 16],
+            idle_timeout_secs: 900,
         };
 
         let payload = build_create_request(&req).unwrap();

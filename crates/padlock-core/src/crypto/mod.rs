@@ -29,6 +29,7 @@ pub mod hkdf_keys;
 pub mod hmac;
 pub mod kdf;
 pub mod memory;
+pub mod recovery;
 pub mod secret_buf;
 
 pub use aead::{aead_decrypt, aead_encrypt, generate_dek, generate_nonce, unwrap_dek, wrap_dek};

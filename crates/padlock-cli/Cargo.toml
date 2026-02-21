@@ -23,7 +23,7 @@ clap_complete = "4.5"
 anyhow = "1.0"
 
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "signal"] }
 
 # Password input
 rpassword = "7.3"

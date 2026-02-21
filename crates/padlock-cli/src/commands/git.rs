@@ -86,8 +86,19 @@ fn run_setup(cmd: GitSetupCmd, vault_path: &str, json: bool) -> anyhow::Result<(
 
     for (entry_id, name) in &entries {
         if let Ok(entry) = read_entry(&vault, entry_id) {
-            if let EntryData::SSHKey { public_key, key_type, comment, .. } = &entry.data {
-                ssh_keys.push((name.clone(), public_key.clone(), format!("{key_type:?}"), comment.clone()));
+            if let EntryData::SSHKey {
+                public_key,
+                key_type,
+                comment,
+                ..
+            } = &entry.data
+            {
+                ssh_keys.push((
+                    name.clone(),
+                    public_key.clone(),
+                    format!("{key_type:?}"),
+                    comment.clone(),
+                ));
             }
         }
     }
@@ -146,7 +157,10 @@ fn run_setup(cmd: GitSetupCmd, vault_path: &str, json: bool) -> anyhow::Result<(
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         println!("Git signing configured successfully!");
-        println!("  Scope:           {}", if cmd.global { "global" } else { "local" });
+        println!(
+            "  Scope:           {}",
+            if cmd.global { "global" } else { "local" }
+        );
         println!("  Key:             {key_name} ({key_type})");
         println!("  Public key:      {}", pub_key_path.display());
         println!("  Allowed signers: {}", allowed_signers_path.display());
@@ -250,7 +264,10 @@ fn run_allowed_signers(
                     })
                 })
                 .collect();
-            println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "signers": entries }))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({ "signers": entries }))?
+            );
         } else if signers.is_empty() {
             println!("No SSH keys found in vault.");
         } else {
