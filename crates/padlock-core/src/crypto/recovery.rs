@@ -172,9 +172,10 @@ pub fn unwrap_keys_from_recovery(
     nonce: &[u8; RECOVERY_NONCE_SIZE],
     blob: &[u8],
 ) -> Result<(SecretBuf, SecretBuf)> {
-    let plaintext = aead_decrypt(wrapping_key, nonce, &[], blob)?;
+    let mut plaintext = aead_decrypt(wrapping_key, nonce, &[], blob)?;
 
     if plaintext.len() != 64 {
+        plaintext.zeroize();
         return Err(Error::Crypto(CryptoError::InvalidKeyLength {
             expected: 64,
             actual: plaintext.len(),
@@ -184,6 +185,7 @@ pub fn unwrap_keys_from_recovery(
     let kek = SecretBuf::from_bytes(&plaintext[..32]);
     let mackey = SecretBuf::from_bytes(&plaintext[32..]);
 
+    plaintext.zeroize();
     Ok((kek, mackey))
 }
 
