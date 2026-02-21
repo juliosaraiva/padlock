@@ -23,6 +23,11 @@ pub struct InitCmd {
 }
 
 /// Execute the init command.
+///
+/// # Errors
+///
+/// Returns an error if vault initialization fails.
+#[allow(clippy::needless_pass_by_value)]
 pub fn run(cmd: InitCmd) -> anyhow::Result<()> {
     let path = resolve_vault_path(&cmd.vault_path);
 

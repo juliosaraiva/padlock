@@ -38,23 +38,19 @@ impl Default for InMemoryBackend {
 
 impl StorageBackend for InMemoryBackend {
     fn write_vault(&self, data: &[u8]) -> Result<()> {
-        let mut vault = self.vault_data.lock().map_err(|e| {
-            padlock_core::error::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        })?;
+        let mut vault = self
+            .vault_data
+            .lock()
+            .map_err(|e| padlock_core::error::Error::Io(std::io::Error::other(e.to_string())))?;
         *vault = Some(data.to_vec());
         Ok(())
     }
 
     fn read_vault(&self) -> Result<Vec<u8>> {
-        let vault = self.vault_data.lock().map_err(|e| {
-            padlock_core::error::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        })?;
+        let vault = self
+            .vault_data
+            .lock()
+            .map_err(|e| padlock_core::error::Error::Io(std::io::Error::other(e.to_string())))?;
         vault.clone().ok_or_else(|| {
             padlock_core::error::Error::Vault(padlock_core::error::VaultError::NotFound {
                 path: "<in-memory>".to_string(),
@@ -63,22 +59,18 @@ impl StorageBackend for InMemoryBackend {
     }
 
     fn vault_exists(&self) -> Result<bool> {
-        let vault = self.vault_data.lock().map_err(|e| {
-            padlock_core::error::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        })?;
+        let vault = self
+            .vault_data
+            .lock()
+            .map_err(|e| padlock_core::error::Error::Io(std::io::Error::other(e.to_string())))?;
         Ok(vault.is_some())
     }
 
     fn write_backup(&self, data: &[u8]) -> Result<()> {
-        let mut backup = self.backup_data.lock().map_err(|e| {
-            padlock_core::error::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        })?;
+        let mut backup = self
+            .backup_data
+            .lock()
+            .map_err(|e| padlock_core::error::Error::Io(std::io::Error::other(e.to_string())))?;
         *backup = Some(data.to_vec());
         Ok(())
     }
@@ -148,7 +140,7 @@ impl TestAuditLogger {
     pub fn events(&self) -> Vec<AuditEvent> {
         self.events
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 }
@@ -161,12 +153,10 @@ impl Default for TestAuditLogger {
 
 impl padlock_core::traits::audit::AuditLogger for TestAuditLogger {
     fn log_event(&self, event: &AuditEvent) -> Result<()> {
-        let mut events = self.events.lock().map_err(|e| {
-            padlock_core::error::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        })?;
+        let mut events = self
+            .events
+            .lock()
+            .map_err(|e| padlock_core::error::Error::Io(std::io::Error::other(e.to_string())))?;
         events.push(event.clone());
         Ok(())
     }

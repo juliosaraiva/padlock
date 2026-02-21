@@ -21,6 +21,7 @@
 use hkdf::Hkdf;
 use rand::RngCore;
 use sha2::Sha256;
+use zeroize::Zeroize;
 
 use super::aead::{aead_decrypt, aead_encrypt, generate_nonce};
 use super::secret_buf::SecretBuf;
@@ -78,6 +79,8 @@ pub fn encode_recovery_key(key: &SecretBuf) -> String {
 /// # Errors
 ///
 /// Returns `CryptoError::InvalidKeyLength` if the decoded key is not 32 bytes.
+/// Returns `CryptoError::InvalidEncoding` if the string contains non-UTF-8 or
+/// non-hexadecimal characters.
 pub fn decode_recovery_key(encoded: &str) -> Result<SecretBuf> {
     let hex: String = encoded.chars().filter(|c| *c != '-').collect();
     if hex.len() != RECOVERY_KEY_SIZE * 2 {
@@ -90,20 +93,20 @@ pub fn decode_recovery_key(encoded: &str) -> Result<SecretBuf> {
     let mut bytes = vec![0u8; RECOVERY_KEY_SIZE];
     for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
         let s = std::str::from_utf8(chunk).map_err(|_| {
-            Error::Crypto(CryptoError::InvalidKeyLength {
-                expected: RECOVERY_KEY_SIZE,
-                actual: 0,
+            Error::Crypto(CryptoError::InvalidEncoding {
+                reason: "recovery key contains non-UTF-8 characters".to_string(),
             })
         })?;
         bytes[i] = u8::from_str_radix(s, 16).map_err(|_| {
-            Error::Crypto(CryptoError::InvalidKeyLength {
-                expected: RECOVERY_KEY_SIZE,
-                actual: 0,
+            Error::Crypto(CryptoError::InvalidEncoding {
+                reason: "recovery key contains non-hexadecimal characters".to_string(),
             })
         })?;
     }
 
-    Ok(SecretBuf::from_bytes(&bytes))
+    let secret = SecretBuf::from_bytes(&bytes);
+    bytes.zeroize();
+    Ok(secret)
 }
 
 /// Derive a recovery wrapping key from the recovery key and salt.
@@ -228,7 +231,7 @@ mod tests {
         assert!(encoded.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
         assert!(encoded
             .chars()
-            .filter(|c| c.is_ascii_alphabetic())
+            .filter(char::is_ascii_alphabetic)
             .all(|c| c.is_ascii_uppercase()));
     }
 
@@ -237,7 +240,12 @@ mod tests {
         let result = decode_recovery_key(
             "ZZZZZZZZ-ZZZZZZZZ-ZZZZZZZZ-ZZZZZZZZ-ZZZZZZZZ-ZZZZZZZZ-ZZZZZZZZ-ZZZZZZZZ",
         );
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(crate::error::Error::Crypto(
+                crate::error::CryptoError::InvalidEncoding { .. }
+            ))
+        ));
     }
 
     #[test]

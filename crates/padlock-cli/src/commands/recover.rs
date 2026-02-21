@@ -22,6 +22,11 @@ pub struct RecoverCmd {
 }
 
 /// Execute the recover command.
+///
+/// # Errors
+///
+/// Returns an error if vault recovery fails.
+#[allow(clippy::needless_pass_by_value)]
 pub fn run(cmd: RecoverCmd) -> anyhow::Result<()> {
     let path = resolve_vault_path(&cmd.vault_path);
     if !path.exists() {

@@ -1,6 +1,6 @@
 //! Binary vault file format parsing and serialization.
 //!
-//! Handles the vault header (1024 bytes), vault index (MessagePack),
+//! Handles the vault header (1024 bytes), vault index (`MessagePack`),
 //! and entry metadata structures. All multi-byte integers use
 //! little-endian byte order.
 //!
@@ -295,7 +295,7 @@ pub struct EntryMetadata {
 
 /// Vault index mapping entry UUIDs to their metadata.
 ///
-/// The index is serialized as MessagePack and stored between the
+/// The index is serialized as `MessagePack` and stored between the
 /// header and the entries blob in the vault file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultIndex {
@@ -367,7 +367,7 @@ impl Default for VaultIndex {
     }
 }
 
-/// Serialize a vault index to MessagePack bytes.
+/// Serialize a vault index to `MessagePack` bytes.
 ///
 /// # Errors
 ///
@@ -380,7 +380,7 @@ pub fn serialize_index(index: &VaultIndex) -> crate::error::Result<Vec<u8>> {
     })
 }
 
-/// Deserialize a vault index from MessagePack bytes.
+/// Deserialize a vault index from `MessagePack` bytes.
 ///
 /// # Errors
 ///
