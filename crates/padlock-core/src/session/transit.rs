@@ -5,7 +5,7 @@
 //!
 //! 1. Initiator generates ephemeral X25519 keypair, sends pubkey
 //! 2. Responder generates ephemeral X25519 keypair, computes shared secret
-//! 3. HKDF(shared_secret, info="padlock-session-transit") → transit key
+//! 3. `HKDF(shared_secret, info="padlock-session-transit")` → transit key
 //! 4. XChaCha20-Poly1305(transit_key, KEK) → encrypted KEK for transit
 //! 5. Both sides zero ephemeral keys immediately after use
 
@@ -111,7 +111,7 @@ pub fn transit_decrypt(
 /// initiator's public key.
 ///
 /// This function generates a fresh ephemeral keypair, computes the shared
-/// secret, and returns (our_public_key, transit_key).
+/// secret, and returns (`our_public_key`, `transit_key`).
 ///
 /// # Errors
 ///

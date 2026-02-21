@@ -19,6 +19,7 @@ use crate::vault::lifecycle::Vault;
 ///
 /// Returns `VaultError::Locked` if the vault is not unlocked.
 /// Returns `EntryError::AlreadyExists` if an entry with the same name exists.
+#[allow(clippy::needless_pass_by_value)]
 pub fn create_entry(
     vault: &mut Vault,
     name: String,
@@ -35,17 +36,17 @@ pub fn create_entry(
     }
 
     let mut entry = Entry::new(name.clone(), data);
-    entry.tags = tags.clone();
+    tags.clone_into(&mut entry.tags);
 
     // Serialize and encrypt
     let serialized = serialize_entry(&entry)?;
-    let encrypted = crate::vault::entries::encrypt_entry(&serialized, &kek)?;
+    let encrypted = crate::vault::entries::encrypt_entry(&serialized, kek)?;
 
     // Append to entries blob in place (avoids full-blob copy)
     let (offset, length) = vault.append_to_entries_blob(&encrypted)?;
 
     // Update index
-    let now = Timestamp::now().as_epoch_secs() as u64;
+    let now = u64::try_from(Timestamp::now().as_epoch_secs()).unwrap_or(0);
     let uuid = *entry.id.as_bytes();
     let index = vault.index_mut()?;
     index.entries.insert(
@@ -87,7 +88,7 @@ pub fn read_entry(vault: &Vault, id: &EntryId) -> crate::error::Result<Entry> {
         .filter(|m| !m.deleted)
         .ok_or_else(|| Error::Entry(EntryError::NotFound { id: id.to_string() }))?;
 
-    let offset = meta.entry_offset as usize;
+    let offset = usize::try_from(meta.entry_offset).map_err(|_| Error::Vault(VaultError::CorruptedData))?;
     let length = meta.entry_length as usize;
     let blob = vault.entries_blob();
 
@@ -121,7 +122,7 @@ pub fn update_entry(
 
     // Re-serialize and encrypt
     let serialized = serialize_entry(&entry)?;
-    let encrypted = crate::vault::entries::encrypt_entry(&serialized, &kek)?;
+    let encrypted = crate::vault::entries::encrypt_entry(&serialized, kek)?;
 
     // Append new version to blob in place (old data becomes dead space)
     let (offset, length) = vault.append_to_entries_blob(&encrypted)?;
@@ -143,8 +144,8 @@ pub fn update_entry(
     if let Some(meta) = index.entries.get_mut(&uuid) {
         meta.entry_offset = offset;
         meta.entry_length = length;
-        meta.modified_at = Timestamp::now().as_epoch_secs() as u64;
-        meta.tags = new_tags.clone();
+        meta.modified_at = u64::try_from(Timestamp::now().as_epoch_secs()).unwrap_or(0);
+        meta.tags.clone_from(&new_tags);
     }
 
     index.add_tags(uuid, &new_tags);
@@ -172,7 +173,7 @@ pub fn delete_entry(vault: &mut Vault, id: &EntryId) -> crate::error::Result<()>
         .ok_or_else(|| Error::Entry(EntryError::NotFound { id: id.to_string() }))?;
 
     meta.deleted = true;
-    meta.modified_at = Timestamp::now().as_epoch_secs() as u64;
+    meta.modified_at = u64::try_from(Timestamp::now().as_epoch_secs()).unwrap_or(0);
 
     // Remove from tag index
     let tags = meta.tags.clone();
@@ -239,7 +240,7 @@ pub fn search_by_name(vault: &Vault, query: &str) -> crate::error::Result<Vec<En
             continue;
         }
         if contains_case_insensitive(&meta.title, query) {
-            let offset = meta.entry_offset as usize;
+            let Ok(offset) = usize::try_from(meta.entry_offset) else { continue };
             let length = meta.entry_length as usize;
             let blob = vault.entries_blob();
             if offset + length <= blob.len() {
@@ -282,7 +283,7 @@ pub fn search_by_tag(vault: &Vault, tag: &str) -> crate::error::Result<Vec<Entry
                 if m.deleted {
                     continue;
                 }
-                let offset = m.entry_offset as usize;
+                let Ok(offset) = usize::try_from(m.entry_offset) else { continue };
                 let length = m.entry_length as usize;
                 let blob = vault.entries_blob();
                 if offset + length <= blob.len() {
@@ -304,7 +305,7 @@ pub fn search_by_tag(vault: &Vault, tag: &str) -> crate::error::Result<Vec<Entry
         if meta.deleted {
             continue;
         }
-        let offset = meta.entry_offset as usize;
+        let Ok(offset) = usize::try_from(meta.entry_offset) else { continue };
         let length = meta.entry_length as usize;
         let blob = vault.entries_blob();
         if offset + length <= blob.len() {

@@ -231,7 +231,7 @@ mod tests {
         assert!(encoded.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
         assert!(encoded
             .chars()
-            .filter(|c| c.is_ascii_alphabetic())
+            .filter(char::is_ascii_alphabetic)
             .all(|c| c.is_ascii_uppercase()));
     }
 

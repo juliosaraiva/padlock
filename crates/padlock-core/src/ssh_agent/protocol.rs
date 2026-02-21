@@ -64,7 +64,7 @@ pub enum AgentMessage {
 pub enum AgentResponse {
     /// List of available identities.
     IdentitiesAnswer {
-        /// List of (public_key_blob, comment) pairs.
+        /// List of (`public_key_blob`, comment) pairs.
         keys: Vec<(Vec<u8>, String)>,
     },
     /// Signature response.
@@ -92,7 +92,7 @@ fn read_u32(data: &[u8]) -> Option<u32> {
 }
 
 /// Read a length-prefixed string/blob from a byte slice.
-/// Returns (value, bytes_consumed).
+/// Returns (`value`, `bytes_consumed`).
 fn read_string(data: &[u8]) -> Option<(Vec<u8>, usize)> {
     let len = read_u32(data)? as usize;
     if data.len() < 4 + len {
@@ -204,6 +204,11 @@ pub fn parse_message(data: &[u8]) -> crate::error::Result<AgentMessage> {
 /// Serialize an SSH agent response to wire bytes.
 ///
 /// Returns the complete message including the 4-byte length prefix.
+///
+/// # Panics
+///
+/// Panics if any field length exceeds `u32::MAX` bytes (not possible in
+/// practice for valid SSH agent messages).
 #[must_use]
 pub fn serialize_response(response: &AgentResponse) -> Vec<u8> {
     let mut payload = Vec::new();
@@ -211,18 +216,18 @@ pub fn serialize_response(response: &AgentResponse) -> Vec<u8> {
     match response {
         AgentResponse::IdentitiesAnswer { keys } => {
             payload.push(SSH_AGENT_IDENTITIES_ANSWER);
-            payload.extend_from_slice(&(keys.len() as u32).to_be_bytes());
+            payload.extend_from_slice(&u32::try_from(keys.len()).expect("key count fits in u32").to_be_bytes());
             for (blob, comment) in keys {
-                payload.extend_from_slice(&(blob.len() as u32).to_be_bytes());
+                payload.extend_from_slice(&u32::try_from(blob.len()).expect("blob length fits in u32").to_be_bytes());
                 payload.extend_from_slice(blob);
                 let comment_bytes = comment.as_bytes();
-                payload.extend_from_slice(&(comment_bytes.len() as u32).to_be_bytes());
+                payload.extend_from_slice(&u32::try_from(comment_bytes.len()).expect("comment length fits in u32").to_be_bytes());
                 payload.extend_from_slice(comment_bytes);
             }
         }
         AgentResponse::SignResponse { signature } => {
             payload.push(SSH_AGENT_SIGN_RESPONSE);
-            payload.extend_from_slice(&(signature.len() as u32).to_be_bytes());
+            payload.extend_from_slice(&u32::try_from(signature.len()).expect("signature length fits in u32").to_be_bytes());
             payload.extend_from_slice(signature);
         }
         AgentResponse::ExtensionResponse {
@@ -240,7 +245,7 @@ pub fn serialize_response(response: &AgentResponse) -> Vec<u8> {
     }
 
     // Prepend length
-    let len = payload.len() as u32;
+    let len = u32::try_from(payload.len()).expect("payload length fits in u32");
     let mut message = Vec::with_capacity(4 + payload.len());
     message.extend_from_slice(&len.to_be_bytes());
     message.extend_from_slice(&payload);
