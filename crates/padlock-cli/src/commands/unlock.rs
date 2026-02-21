@@ -12,6 +12,10 @@ use super::{prompt_passphrase, resolve_vault_path};
 pub struct UnlockCmd {}
 
 /// Execute the unlock command.
+///
+/// # Errors
+///
+/// Returns an error if vault unlock fails.
 pub fn run(_cmd: UnlockCmd, vault_path: &str, json: bool, no_session: bool) -> anyhow::Result<()> {
     let path = resolve_vault_path(vault_path);
     let storage = FilesystemBackend::new(path.clone());

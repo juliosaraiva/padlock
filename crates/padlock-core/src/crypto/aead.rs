@@ -130,7 +130,7 @@ pub fn generate_dek() -> SecretBuf {
 ///
 /// # Returns
 ///
-/// A tuple of (wrapped_dek, nonce) where:
+/// A tuple of (`wrapped_dek`, nonce) where:
 /// - `wrapped_dek` is 48 bytes (32 bytes DEK + 16 bytes auth tag)
 /// - `nonce` is 24 bytes
 ///

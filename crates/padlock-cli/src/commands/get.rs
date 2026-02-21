@@ -18,6 +18,11 @@ pub struct GetCmd {
 }
 
 /// Execute the get command.
+///
+/// # Errors
+///
+/// Returns an error if vault access or entry lookup fails.
+#[allow(clippy::needless_pass_by_value)]
 pub fn run(
     cmd: GetCmd,
     vault_path: &str,
@@ -48,10 +53,8 @@ pub fn run(
         fmt.json(&output);
     } else if cmd.password_only || fmt.is_quiet() {
         match &entry.data {
-            padlock_core::entries::EntryData::Credential { password, .. } => {
-                print!("{password}");
-            }
-            padlock_core::entries::EntryData::Netrc { password, .. } => {
+            padlock_core::entries::EntryData::Credential { password, .. }
+            | padlock_core::entries::EntryData::Netrc { password, .. } => {
                 print!("{password}");
             }
             _ => anyhow::bail!("entry type does not have a password field"),

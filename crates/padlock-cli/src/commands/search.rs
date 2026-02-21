@@ -19,6 +19,11 @@ pub struct SearchCmd {
 }
 
 /// Execute the search command.
+///
+/// # Errors
+///
+/// Returns an error if vault access or search fails.
+#[allow(clippy::needless_pass_by_value)]
 pub fn run(
     cmd: SearchCmd,
     vault_path: &str,

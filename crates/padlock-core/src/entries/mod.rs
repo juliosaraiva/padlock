@@ -1,7 +1,7 @@
 //! Credential entry types, CRUD operations, and serialization.
 //!
-//! This module defines the entry types (Credential, SSHKey, TOTP, etc.),
-//! their MessagePack serialization, and CRUD operations for managing
+//! This module defines the entry types (Credential, `SSHKey`, TOTP, etc.),
+//! their `MessagePack` serialization, and CRUD operations for managing
 //! entries within an unlocked vault.
 
 pub mod crud;

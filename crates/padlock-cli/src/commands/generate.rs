@@ -4,6 +4,7 @@ use clap::Args;
 use padlock_core::generate::{estimate_strength, generate_password, PasswordPolicy};
 
 /// Generate a random password.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Args)]
 pub struct GenerateCmd {
     /// Password length.
@@ -28,6 +29,11 @@ pub struct GenerateCmd {
 }
 
 /// Execute the generate command.
+///
+/// # Errors
+///
+/// Returns an error if password generation fails.
+#[allow(clippy::needless_pass_by_value)]
 pub fn run(cmd: GenerateCmd, json: bool) -> anyhow::Result<()> {
     let policy = PasswordPolicy {
         length: cmd.length,
