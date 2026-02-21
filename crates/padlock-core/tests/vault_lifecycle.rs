@@ -172,8 +172,9 @@ fn test_vault_reopen_preserves_entry_data() {
     assert_eq!(vault2.index().entries.len(), 1);
     let meta = vault2.index().entries.get(&entry_uuid).unwrap();
     assert_eq!(meta.title, "admin-creds");
-    let blob = &vault2.entries_blob()
-        [usize::try_from(meta.entry_offset).expect("fits in usize")..usize::try_from(meta.entry_offset).expect("fits in usize") + usize::try_from(meta.entry_length).expect("fits in usize")];
+    let offset = usize::try_from(meta.entry_offset).expect("fits in usize");
+    let len = usize::try_from(meta.entry_length).expect("fits in usize");
+    let blob = &vault2.entries_blob()[offset..offset + len];
     let decrypted = decrypt_entry(blob, vault2.kek().unwrap()).unwrap();
     assert_eq!(decrypted, plaintext);
 }
@@ -225,8 +226,9 @@ fn test_vault_reopen_preserves_multiple_entries() {
     for i in 0u8..5 {
         let uuid = [i + 1; 16];
         let meta = vault2.index().entries.get(&uuid).unwrap();
-        let entry_blob = &vault2.entries_blob()
-            [usize::try_from(meta.entry_offset).expect("fits in usize")..usize::try_from(meta.entry_offset).expect("fits in usize") + usize::try_from(meta.entry_length).expect("fits in usize")];
+        let offset = usize::try_from(meta.entry_offset).expect("fits in usize");
+        let len = usize::try_from(meta.entry_length).expect("fits in usize");
+        let entry_blob = &vault2.entries_blob()[offset..offset + len];
         let decrypted = decrypt_entry(entry_blob, vault2.kek().unwrap()).unwrap();
         assert_eq!(decrypted, format!("entry-data-{i}").as_bytes());
     }
@@ -272,8 +274,9 @@ fn test_vault_change_passphrase_new_passphrase_works() {
     // New passphrase works
     let vault2 = Vault::open("new-pass", &backend, &params).unwrap();
     let meta = vault2.index().entries.get(&entry_uuid).unwrap();
-    let blob = &vault2.entries_blob()
-        [usize::try_from(meta.entry_offset).expect("fits in usize")..usize::try_from(meta.entry_offset).expect("fits in usize") + usize::try_from(meta.entry_length).expect("fits in usize")];
+    let offset = usize::try_from(meta.entry_offset).expect("fits in usize");
+    let len = usize::try_from(meta.entry_length).expect("fits in usize");
+    let blob = &vault2.entries_blob()[offset..offset + len];
     let decrypted = decrypt_entry(blob, vault2.kek().unwrap()).unwrap();
     assert_eq!(decrypted, b"preserved-secret");
 }

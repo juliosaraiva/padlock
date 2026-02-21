@@ -119,7 +119,7 @@ pub enum Commands {
 }
 
 /// Resolve the vault path, expanding ~ to the home directory.
-#[must_use] 
+#[must_use]
 pub fn resolve_vault_path(path: &str) -> PathBuf {
     if path.starts_with('~') {
         if let Some(home) = dirs::home_dir() {
