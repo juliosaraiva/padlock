@@ -321,7 +321,10 @@ impl VaultIndex {
     ///
     /// Duplicate UUIDs for the same tag are silently ignored, so calling this
     /// method multiple times with the same `uuid` / `tags` combination is
-    /// idempotent and `search_by_tag` will never return duplicate entries.
+    /// idempotent and this method will not introduce duplicate UUIDs per tag.
+    /// Note that pre-existing duplicates in `tag_index` (for example from
+    /// older vaults) are not cleaned up, so `search_by_tag` may still return
+    /// duplicate entries if they were already present.
     pub fn add_tags(&mut self, uuid: [u8; 16], tags: &[String]) {
         for tag in tags {
             let key = tag.to_lowercase();
