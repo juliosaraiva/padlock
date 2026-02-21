@@ -84,7 +84,8 @@ pub fn decrypt_entry(blob: &[u8], kek: &SecretBuf) -> crate::error::Result<Vec<u
     // Parse the blob
     let dek_nonce = &blob[..NONCE_SIZE];
     let wrapped_dek = &blob[NONCE_SIZE..NONCE_SIZE + KEY_SIZE + TAG_SIZE];
-    let data_nonce = &blob[NONCE_SIZE + KEY_SIZE + TAG_SIZE..NONCE_SIZE + KEY_SIZE + TAG_SIZE + NONCE_SIZE];
+    let data_nonce =
+        &blob[NONCE_SIZE + KEY_SIZE + TAG_SIZE..NONCE_SIZE + KEY_SIZE + TAG_SIZE + NONCE_SIZE];
     let ciphertext = &blob[NONCE_SIZE + KEY_SIZE + TAG_SIZE + NONCE_SIZE..];
 
     // Unwrap the DEK

@@ -17,6 +17,7 @@ use crate::error::{Error, GenerateError};
 
 /// Policy for password generation.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct PasswordPolicy {
     /// Password length.
     pub length: usize,
@@ -65,7 +66,10 @@ pub fn generate_password(policy: &PasswordPolicy) -> String {
         charset.push_str("!@#$%^&*()-_=+[]{}|;:,.<>?");
     }
 
-    assert!(!charset.is_empty(), "at least one character class must be enabled");
+    assert!(
+        !charset.is_empty(),
+        "at least one character class must be enabled"
+    );
 
     let chars: Vec<char> = charset.chars().collect();
     let mut rng = rand::rngs::OsRng;
@@ -86,15 +90,14 @@ pub fn estimate_strength(password: &str) -> u8 {
     let has_digit = password.chars().any(|c| c.is_ascii_digit());
     let has_symbol = password.chars().any(|c| !c.is_alphanumeric());
 
-    let variety = u8::from(has_lower) + u8::from(has_upper) + u8::from(has_digit) + u8::from(has_symbol);
+    let variety =
+        u8::from(has_lower) + u8::from(has_upper) + u8::from(has_digit) + u8::from(has_symbol);
 
     match (len, variety) {
         (0..=7, _) => 0,
         (8..=11, 0..=1) => 1,
-        (8..=11, _) => 2,
-        (12..=15, 0..=2) => 2,
-        (12..=15, _) => 3,
-        (_, 0..=2) => 3,
+        (8..=11, _) | (12..=15, 0..=2) => 2,
+        (12..=15, _) | (_, 0..=2) => 3,
         _ => 4,
     }
 }
@@ -173,9 +176,14 @@ fn generate_totp_code_at(
     let modulus = 10u32.pow(digits);
     let code = binary % modulus;
 
-    let seconds_remaining = period - (unix_time % u64::from(period)) as u32;
+    let seconds_remaining = period
+        - u32::try_from(unix_time % u64::from(period))
+            .expect("remainder is always less than period which fits in u32");
 
-    Ok((format!("{code:0>width$}", width = digits as usize), seconds_remaining))
+    Ok((
+        format!("{code:0>width$}", width = digits as usize),
+        seconds_remaining,
+    ))
 }
 
 /// Get the current Unix timestamp in seconds.
@@ -198,7 +206,10 @@ mod tests {
 
     #[test]
     fn test_generate_password_custom_length() {
-        let policy = PasswordPolicy { length: 16, ..Default::default() };
+        let policy = PasswordPolicy {
+            length: 16,
+            ..Default::default()
+        };
         let password = generate_password(&policy);
         assert_eq!(password.len(), 16);
     }
@@ -251,56 +262,33 @@ mod tests {
     #[test]
     fn test_totp_sha1_rfc6238_time_59() {
         // RFC 6238 Appendix B: time=59, SHA1, expected=94287082 (8 digits)
-        let (code, _) = generate_totp_code_at(
-            RFC_SECRET_SHA1,
-            &TOTPAlgorithm::SHA1,
-            8,
-            30,
-            59,
-        )
-        .unwrap();
+        let (code, _) =
+            generate_totp_code_at(RFC_SECRET_SHA1, &TOTPAlgorithm::SHA1, 8, 30, 59).unwrap();
         assert_eq!(code, "94287082");
     }
 
     #[test]
     fn test_totp_sha256_rfc6238_time_59() {
         // RFC 6238 Appendix B: time=59, SHA256, expected=46119246 (8 digits)
-        let (code, _) = generate_totp_code_at(
-            RFC_SECRET_SHA256,
-            &TOTPAlgorithm::SHA256,
-            8,
-            30,
-            59,
-        )
-        .unwrap();
+        let (code, _) =
+            generate_totp_code_at(RFC_SECRET_SHA256, &TOTPAlgorithm::SHA256, 8, 30, 59).unwrap();
         assert_eq!(code, "46119246");
     }
 
     #[test]
     fn test_totp_sha512_rfc6238_time_59() {
         // RFC 6238 Appendix B: time=59, SHA512, expected=90693936 (8 digits)
-        let (code, _) = generate_totp_code_at(
-            RFC_SECRET_SHA512,
-            &TOTPAlgorithm::SHA512,
-            8,
-            30,
-            59,
-        )
-        .unwrap();
+        let (code, _) =
+            generate_totp_code_at(RFC_SECRET_SHA512, &TOTPAlgorithm::SHA512, 8, 30, 59).unwrap();
         assert_eq!(code, "90693936");
     }
 
     #[test]
     fn test_totp_sha1_rfc6238_time_1111111109() {
         // RFC 6238 Appendix B: time=1111111109, SHA1, expected=07081804
-        let (code, _) = generate_totp_code_at(
-            RFC_SECRET_SHA1,
-            &TOTPAlgorithm::SHA1,
-            8,
-            30,
-            1_111_111_109,
-        )
-        .unwrap();
+        let (code, _) =
+            generate_totp_code_at(RFC_SECRET_SHA1, &TOTPAlgorithm::SHA1, 8, 30, 1_111_111_109)
+                .unwrap();
         assert_eq!(code, "07081804");
     }
 
@@ -335,81 +323,47 @@ mod tests {
     #[test]
     fn test_totp_sha1_rfc6238_time_1234567890() {
         // RFC 6238 Appendix B: time=1234567890, SHA1, expected=89005924
-        let (code, _) = generate_totp_code_at(
-            RFC_SECRET_SHA1,
-            &TOTPAlgorithm::SHA1,
-            8,
-            30,
-            1_234_567_890,
-        )
-        .unwrap();
+        let (code, _) =
+            generate_totp_code_at(RFC_SECRET_SHA1, &TOTPAlgorithm::SHA1, 8, 30, 1_234_567_890)
+                .unwrap();
         assert_eq!(code, "89005924");
     }
 
     #[test]
     fn test_totp_seconds_remaining() {
         // At time=59, period=30: counter=1, elapsed in period=29, remaining=1
-        let (_, remaining) = generate_totp_code_at(
-            RFC_SECRET_SHA1,
-            &TOTPAlgorithm::SHA1,
-            8,
-            30,
-            59,
-        )
-        .unwrap();
+        let (_, remaining) =
+            generate_totp_code_at(RFC_SECRET_SHA1, &TOTPAlgorithm::SHA1, 8, 30, 59).unwrap();
         assert_eq!(remaining, 1);
     }
 
     #[test]
     fn test_totp_seconds_remaining_start_of_period() {
         // At time=60, period=30: elapsed in period=0, remaining=30
-        let (_, remaining) = generate_totp_code_at(
-            RFC_SECRET_SHA1,
-            &TOTPAlgorithm::SHA1,
-            8,
-            30,
-            60,
-        )
-        .unwrap();
+        let (_, remaining) =
+            generate_totp_code_at(RFC_SECRET_SHA1, &TOTPAlgorithm::SHA1, 8, 30, 60).unwrap();
         assert_eq!(remaining, 30);
     }
 
     #[test]
     fn test_totp_six_digits() {
         // Standard 6-digit TOTP
-        let (code, _) = generate_totp_code_at(
-            RFC_SECRET_SHA1,
-            &TOTPAlgorithm::SHA1,
-            6,
-            30,
-            59,
-        )
-        .unwrap();
+        let (code, _) =
+            generate_totp_code_at(RFC_SECRET_SHA1, &TOTPAlgorithm::SHA1, 6, 30, 59).unwrap();
         assert_eq!(code.len(), 6);
         assert_eq!(code, "287082");
     }
 
     #[test]
     fn test_totp_invalid_base32_secret() {
-        let result = generate_totp_code_at(
-            "!!!invalid!!!",
-            &TOTPAlgorithm::SHA1,
-            6,
-            30,
-            59,
-        );
+        let result = generate_totp_code_at("!!!invalid!!!", &TOTPAlgorithm::SHA1, 6, 30, 59);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_totp_generate_current_time() {
         // Smoke test: generate_totp_code should work with current time
-        let result = generate_totp_code(
-            RFC_SECRET_SHA1,
-            &TOTPAlgorithm::SHA1,
-            6,
-            30,
-        );
+        let result = generate_totp_code(RFC_SECRET_SHA1, &TOTPAlgorithm::SHA1, 6, 30);
         assert!(result.is_ok());
         let (code, remaining) = result.unwrap();
         assert_eq!(code.len(), 6);

@@ -22,5 +22,5 @@ pub mod format;
 pub mod lifecycle;
 pub mod storage;
 
-pub use format::{VaultHeader, VaultIndex, EntryMetadata};
+pub use format::{EntryMetadata, VaultHeader, VaultIndex};
 pub use lifecycle::{KdfParams, Vault, VaultState};

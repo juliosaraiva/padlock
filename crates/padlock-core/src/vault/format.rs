@@ -1,6 +1,6 @@
 //! Binary vault file format parsing and serialization.
 //!
-//! Handles the vault header (1024 bytes), vault index (MessagePack),
+//! Handles the vault header (1024 bytes), vault index (`MessagePack`),
 //! and entry metadata structures. All multi-byte integers use
 //! little-endian byte order.
 //!
@@ -30,8 +30,8 @@ pub const VAULT_HMAC_SIZE: usize = 32;
 /// Vault file header (fixed 1024 bytes).
 ///
 /// Contains metadata about the vault including the Argon2 salt,
-/// entry counts, and section lengths. All multi-byte integers
-/// are stored in little-endian byte order.
+/// KDF parameters, entry counts, and section lengths. All multi-byte
+/// integers are stored in little-endian byte order.
 #[derive(Debug, Clone)]
 pub struct VaultHeader {
     /// Magic bytes: "PADLOCK\0".
@@ -56,12 +56,34 @@ pub struct VaultHeader {
     pub vault_index_length: u32,
     /// Total length of the entries blob in bytes.
     pub entries_blob_length: u32,
+    /// Argon2id memory cost in KiB (0 = use caller-provided fallback).
+    pub argon2_memory_kib: u32,
+    /// Argon2id time cost / iterations (0 = use caller-provided fallback).
+    pub argon2_time_cost: u32,
+    /// Argon2id parallelism / threads (0 = use caller-provided fallback).
+    pub argon2_parallelism: u32,
+    /// Recovery HKDF salt (16 bytes, all zeros if recovery not enabled).
+    pub recovery_salt: [u8; 16],
+    /// Recovery XChaCha20-Poly1305 nonce (24 bytes).
+    pub recovery_nonce: [u8; 24],
+    /// Recovery blob: KEK||MACKEY encrypted under recovery wrapping key (80 bytes).
+    pub recovery_blob: [u8; 80],
 }
 
 impl VaultHeader {
     /// Create a new vault header with the given parameters.
+    ///
+    /// KDF parameters are stored in the header so the vault is self-describing
+    /// and can always be opened with the correct derivation settings.
     #[must_use]
-    pub fn new(argon2_salt: [u8; 16], vault_uuid: [u8; 16], now: u64) -> Self {
+    pub fn new(
+        argon2_salt: [u8; 16],
+        vault_uuid: [u8; 16],
+        now: u64,
+        argon2_memory_kib: u32,
+        argon2_time_cost: u32,
+        argon2_parallelism: u32,
+    ) -> Self {
         Self {
             magic: *MAGIC,
             version: VERSION,
@@ -74,6 +96,12 @@ impl VaultHeader {
             deleted_entry_count: 0,
             vault_index_length: 0,
             entries_blob_length: 0,
+            argon2_memory_kib,
+            argon2_time_cost,
+            argon2_parallelism,
+            recovery_salt: [0u8; 16],
+            recovery_nonce: [0u8; 24],
+            recovery_blob: [0u8; 80],
         }
     }
 
@@ -87,6 +115,21 @@ impl VaultHeader {
     #[must_use]
     pub fn is_version_valid(&self) -> bool {
         self.version == VERSION
+    }
+
+    /// Check whether recovery is enabled (flags bit 1).
+    #[must_use]
+    pub fn recovery_enabled(&self) -> bool {
+        self.flags & 0x02 != 0
+    }
+
+    /// Set or clear the recovery enabled flag (bit 1).
+    pub fn set_recovery_enabled(&mut self, enabled: bool) {
+        if enabled {
+            self.flags |= 0x02;
+        } else {
+            self.flags &= !0x02;
+        }
     }
 }
 
@@ -108,7 +151,13 @@ impl VaultHeader {
 /// 64      4     DELETED_ENTRY_COUNT
 /// 68      4     VAULT_INDEX_LENGTH
 /// 72      4     ENTRIES_BLOB_LENGTH
-/// 76      948   RESERVED (zeros)
+/// 76      4     ARGON2_MEMORY_KIB (0 = use fallback)
+/// 80      4     ARGON2_TIME_COST  (0 = use fallback)
+/// 84      4     ARGON2_PARALLELISM (0 = use fallback)
+/// 88      16    RECOVERY_SALT (zeros if recovery disabled)
+/// 104     24    RECOVERY_NONCE
+/// 128     80    RECOVERY_BLOB (KEK||MACKEY encrypted, + 16 auth tag)
+/// 208     816   RESERVED (zeros)
 /// ```
 #[must_use]
 pub fn serialize_header(header: &VaultHeader) -> [u8; HEADER_SIZE] {
@@ -126,7 +175,13 @@ pub fn serialize_header(header: &VaultHeader) -> [u8; HEADER_SIZE] {
     buf[64..68].copy_from_slice(&header.deleted_entry_count.to_le_bytes());
     buf[68..72].copy_from_slice(&header.vault_index_length.to_le_bytes());
     buf[72..76].copy_from_slice(&header.entries_blob_length.to_le_bytes());
-    // bytes 76-1023: reserved (already zero)
+    buf[76..80].copy_from_slice(&header.argon2_memory_kib.to_le_bytes());
+    buf[80..84].copy_from_slice(&header.argon2_time_cost.to_le_bytes());
+    buf[84..88].copy_from_slice(&header.argon2_parallelism.to_le_bytes());
+    buf[88..104].copy_from_slice(&header.recovery_salt);
+    buf[104..128].copy_from_slice(&header.recovery_nonce);
+    buf[128..208].copy_from_slice(&header.recovery_blob);
+    // bytes 208-1023: reserved (already zero)
 
     buf
 }
@@ -168,6 +223,18 @@ pub fn parse_header(data: &[u8]) -> crate::error::Result<VaultHeader> {
     let deleted_entry_count = u32::from_le_bytes(data[64..68].try_into().unwrap_or([0u8; 4]));
     let vault_index_length = u32::from_le_bytes(data[68..72].try_into().unwrap_or([0u8; 4]));
     let entries_blob_length = u32::from_le_bytes(data[72..76].try_into().unwrap_or([0u8; 4]));
+    let argon2_memory_kib = u32::from_le_bytes(data[76..80].try_into().unwrap_or([0u8; 4]));
+    let argon2_time_cost = u32::from_le_bytes(data[80..84].try_into().unwrap_or([0u8; 4]));
+    let argon2_parallelism = u32::from_le_bytes(data[84..88].try_into().unwrap_or([0u8; 4]));
+
+    let mut recovery_salt = [0u8; 16];
+    recovery_salt.copy_from_slice(&data[88..104]);
+
+    let mut recovery_nonce = [0u8; 24];
+    recovery_nonce.copy_from_slice(&data[104..128]);
+
+    let mut recovery_blob = [0u8; 80];
+    recovery_blob.copy_from_slice(&data[128..208]);
 
     let header = VaultHeader {
         magic,
@@ -181,6 +248,12 @@ pub fn parse_header(data: &[u8]) -> crate::error::Result<VaultHeader> {
         deleted_entry_count,
         vault_index_length,
         entries_blob_length,
+        argon2_memory_kib,
+        argon2_time_cost,
+        argon2_parallelism,
+        recovery_salt,
+        recovery_nonce,
+        recovery_blob,
     };
 
     if !header.is_magic_valid() {
@@ -215,16 +288,23 @@ pub struct EntryMetadata {
     pub deleted: bool,
     /// Entry title/name (for index lookups without decryption).
     pub title: String,
+    /// Denormalized tags for index-level search without decryption.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// Vault index mapping entry UUIDs to their metadata.
 ///
-/// The index is serialized as MessagePack and stored between the
+/// The index is serialized as `MessagePack` and stored between the
 /// header and the entries blob in the vault file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultIndex {
     /// Map from entry UUID to entry metadata.
     pub entries: HashMap<[u8; 16], EntryMetadata>,
+    /// Reverse index from lowercase tag to entry UUIDs.
+    /// Enables O(1) tag lookup instead of O(n) full-decrypt scan.
+    #[serde(default)]
+    pub tag_index: HashMap<String, Vec<[u8; 16]>>,
 }
 
 impl VaultIndex {
@@ -233,6 +313,28 @@ impl VaultIndex {
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            tag_index: HashMap::new(),
+        }
+    }
+
+    /// Add an entry's tags to the tag index.
+    pub fn add_tags(&mut self, uuid: [u8; 16], tags: &[String]) {
+        for tag in tags {
+            let key = tag.to_lowercase();
+            self.tag_index.entry(key).or_default().push(uuid);
+        }
+    }
+
+    /// Remove an entry's tags from the tag index.
+    pub fn remove_tags(&mut self, uuid: &[u8; 16], tags: &[String]) {
+        for tag in tags {
+            let key = tag.to_lowercase();
+            if let Some(uuids) = self.tag_index.get_mut(&key) {
+                uuids.retain(|u| u != uuid);
+                if uuids.is_empty() {
+                    self.tag_index.remove(&key);
+                }
+            }
         }
     }
 
@@ -255,7 +357,7 @@ impl Default for VaultIndex {
     }
 }
 
-/// Serialize a vault index to MessagePack bytes.
+/// Serialize a vault index to `MessagePack` bytes.
 ///
 /// # Errors
 ///
@@ -268,7 +370,7 @@ pub fn serialize_index(index: &VaultIndex) -> crate::error::Result<Vec<u8>> {
     })
 }
 
-/// Deserialize a vault index from MessagePack bytes.
+/// Deserialize a vault index from `MessagePack` bytes.
 ///
 /// # Errors
 ///
@@ -286,7 +388,7 @@ mod tests {
     use super::*;
 
     fn test_header() -> VaultHeader {
-        VaultHeader::new([0xAA; 16], [0xBB; 16], 1_700_000_000)
+        VaultHeader::new([0xAA; 16], [0xBB; 16], 1_700_000_000, 262_144, 3, 4)
     }
 
     #[test]
@@ -304,6 +406,9 @@ mod tests {
         assert_eq!(parsed.modified_timestamp, header.modified_timestamp);
         assert_eq!(parsed.entry_count, header.entry_count);
         assert_eq!(parsed.deleted_entry_count, header.deleted_entry_count);
+        assert_eq!(parsed.argon2_memory_kib, header.argon2_memory_kib);
+        assert_eq!(parsed.argon2_time_cost, header.argon2_time_cost);
+        assert_eq!(parsed.argon2_parallelism, header.argon2_parallelism);
     }
 
     #[test]
@@ -364,6 +469,27 @@ mod tests {
     }
 
     #[test]
+    fn test_header_kdf_params_round_trip() {
+        let header = VaultHeader::new([0xCC; 16], [0xDD; 16], 1_700_000_000, 262_144, 3, 4);
+        let bytes = serialize_header(&header);
+        let parsed = parse_header(&bytes).unwrap();
+        assert_eq!(parsed.argon2_memory_kib, 262_144);
+        assert_eq!(parsed.argon2_time_cost, 3);
+        assert_eq!(parsed.argon2_parallelism, 4);
+    }
+
+    #[test]
+    fn test_header_kdf_params_zero_for_legacy_vaults() {
+        // Simulate a legacy vault with zeros at offsets 76-87
+        let header = VaultHeader::new([0xCC; 16], [0xDD; 16], 1_700_000_000, 0, 0, 0);
+        let bytes = serialize_header(&header);
+        let parsed = parse_header(&bytes).unwrap();
+        assert_eq!(parsed.argon2_memory_kib, 0);
+        assert_eq!(parsed.argon2_time_cost, 0);
+        assert_eq!(parsed.argon2_parallelism, 0);
+    }
+
+    #[test]
     fn test_index_empty_round_trip() {
         let index = VaultIndex::new();
         let bytes = serialize_index(&index).unwrap();
@@ -385,6 +511,7 @@ mod tests {
                 modified_at: 1_700_000_001,
                 deleted: false,
                 title: "test-entry".to_string(),
+                tags: vec![],
             },
         );
         let bytes = serialize_index(&index).unwrap();
@@ -408,6 +535,7 @@ mod tests {
                 modified_at: 0,
                 deleted: false,
                 title: "active".to_string(),
+                tags: vec![],
             },
         );
         index.entries.insert(
@@ -420,6 +548,7 @@ mod tests {
                 modified_at: 0,
                 deleted: true,
                 title: "deleted".to_string(),
+                tags: vec![],
             },
         );
         assert_eq!(index.active_count(), 1);
@@ -436,5 +565,55 @@ mod tests {
     fn test_header_version_valid() {
         let header = test_header();
         assert!(header.is_version_valid());
+    }
+
+    #[test]
+    fn test_header_recovery_fields_round_trip() {
+        let mut header = test_header();
+        header.recovery_salt = [0x11; 16];
+        header.recovery_nonce = [0x22; 24];
+        header.recovery_blob = [0x33; 80];
+        header.set_recovery_enabled(true);
+
+        let bytes = serialize_header(&header);
+        let parsed = parse_header(&bytes).unwrap();
+
+        assert_eq!(parsed.recovery_salt, [0x11; 16]);
+        assert_eq!(parsed.recovery_nonce, [0x22; 24]);
+        assert_eq!(parsed.recovery_blob, [0x33; 80]);
+        assert!(parsed.recovery_enabled());
+    }
+
+    #[test]
+    fn test_header_recovery_disabled_by_default() {
+        let header = test_header();
+        assert!(!header.recovery_enabled());
+        assert_eq!(header.recovery_salt, [0u8; 16]);
+        assert_eq!(header.recovery_nonce, [0u8; 24]);
+        assert_eq!(header.recovery_blob, [0u8; 80]);
+    }
+
+    #[test]
+    fn test_header_backward_compat_zeros_means_no_recovery() {
+        // A vault with zeros at offsets 88-207 should report recovery disabled
+        let header = test_header();
+        let bytes = serialize_header(&header);
+        let parsed = parse_header(&bytes).unwrap();
+        assert!(!parsed.recovery_enabled());
+    }
+
+    #[test]
+    fn test_header_recovery_flag_set_clear() {
+        let mut header = test_header();
+        assert!(!header.recovery_enabled());
+
+        header.set_recovery_enabled(true);
+        assert!(header.recovery_enabled());
+        // Encrypted flag (bit 0) should still be set
+        assert_eq!(header.flags & 0x01, 0x01);
+
+        header.set_recovery_enabled(false);
+        assert!(!header.recovery_enabled());
+        assert_eq!(header.flags & 0x01, 0x01);
     }
 }

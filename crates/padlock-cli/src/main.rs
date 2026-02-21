@@ -31,16 +31,13 @@ fn determine_exit_code(err: &anyhow::Error) -> i32 {
                 padlock_core::error::VaultError::Locked => 2,
                 padlock_core::error::VaultError::WrongPassphrase => 4,
                 padlock_core::error::VaultError::HmacMismatch => 5,
+                padlock_core::error::VaultError::RecoveryNotEnabled => 6,
                 _ => 1,
             },
-            padlock_core::error::Error::Entry(entry_err) => match entry_err {
-                padlock_core::error::EntryError::NotFound { .. } => 3,
-                _ => 1,
-            },
-            padlock_core::error::Error::Agent(agent_err) => match agent_err {
-                padlock_core::error::AgentError::NotRunning => 10,
-                _ => 1,
-            },
+            padlock_core::error::Error::Entry(padlock_core::error::EntryError::NotFound {
+                ..
+            }) => 3,
+            padlock_core::error::Error::Agent(padlock_core::error::AgentError::NotRunning) => 10,
             _ => 1,
         }
     } else {
@@ -50,24 +47,28 @@ fn determine_exit_code(err: &anyhow::Error) -> i32 {
 
 fn run(cli: Cli) -> anyhow::Result<()> {
     let fmt = output::OutputFormatter::new(cli.json, cli.quiet, cli.no_color);
+    let ns = cli.no_session;
 
     match cli.command {
         Commands::Init(cmd) => commands::init::run(cmd),
-        Commands::Unlock(cmd) => commands::unlock::run(cmd, &cli.vault_path, cli.json),
+        Commands::Unlock(cmd) => commands::unlock::run(cmd, &cli.vault_path, cli.json, ns),
         Commands::Lock(cmd) => commands::lock::run(cmd, &cli.vault_path, cli.json),
-        Commands::Get(cmd) => commands::get::run(cmd, &cli.vault_path, &fmt),
-        Commands::Set(cmd) => commands::set::run(cmd, &cli.vault_path),
-        Commands::Rm(cmd) => commands::rm::run(cmd, &cli.vault_path),
-        Commands::Ls(cmd) => commands::ls::run(cmd, &cli.vault_path, &fmt),
-        Commands::Search(cmd) => commands::search::run(cmd, &cli.vault_path, &fmt),
+        Commands::Get(cmd) => commands::get::run(cmd, &cli.vault_path, &fmt, ns),
+        Commands::Set(cmd) => commands::set::run(cmd, &cli.vault_path, ns),
+        Commands::Rm(cmd) => commands::rm::run(cmd, &cli.vault_path, ns),
+        Commands::Ls(cmd) => commands::ls::run(cmd, &cli.vault_path, &fmt, ns),
+        Commands::Search(cmd) => commands::search::run(cmd, &cli.vault_path, &fmt, ns),
         Commands::Generate(cmd) => commands::generate::run(cmd, cli.json),
         Commands::Status(_) => commands::status::run(&cli.vault_path, &fmt),
         Commands::Agent(cmd) => commands::agent::run(cmd, &cli.vault_path, cli.json),
         Commands::Git(cmd) => commands::git::run(cmd, &cli.vault_path, cli.json),
         Commands::Completions(cmd) => commands::completions::run(cmd),
-        Commands::Totp(cmd) => commands::totp::run(cmd, &cli.vault_path, cli.json),
-        Commands::Exec(cmd) => commands::exec::run(cmd, &cli.vault_path),
+        Commands::Totp(cmd) => commands::totp::run(cmd, &cli.vault_path, cli.json, ns),
+        Commands::Exec(cmd) => commands::exec::run(cmd, &cli.vault_path, ns),
         Commands::Audit(cmd) => commands::audit::run(cmd, &cli.vault_path, &fmt),
         Commands::Config(cmd) => commands::config::run(cmd, &cli.vault_path, cli.json),
+        Commands::Session(cmd) => commands::session::run(cmd, &cli.vault_path, cli.json),
+        Commands::Recover(cmd) => commands::recover::run(cmd),
+        Commands::Recovery(cmd) => commands::recovery::run(cmd, &cli.vault_path, ns),
     }
 }

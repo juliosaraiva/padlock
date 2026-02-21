@@ -26,11 +26,20 @@ pub struct AuditCmd {
 }
 
 /// Run the audit command.
+///
+/// # Panics
+///
+/// Panics if the home directory cannot be determined.
+///
+/// # Errors
+///
+/// Returns an error if audit log reading or filtering fails.
+#[allow(clippy::needless_pass_by_value)]
 pub fn run(cmd: AuditCmd, vault_path: &str, fmt: &OutputFormatter) -> anyhow::Result<()> {
-    let padlock_dir = super::resolve_vault_path(vault_path)
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| dirs::home_dir().unwrap().join(".padlock"));
+    let padlock_dir = super::resolve_vault_path(vault_path).parent().map_or_else(
+        || dirs::home_dir().unwrap().join(".padlock"),
+        std::path::Path::to_path_buf,
+    );
 
     let audit_path = padlock_dir.join("audit.jsonl");
     let log = JsonLinesAuditLog::new(&audit_path)?;
@@ -93,18 +102,16 @@ pub fn run(cmd: AuditCmd, vault_path: &str, fmt: &OutputFormatter) -> anyhow::Re
             padlock_core::types::AuditResult::Failure => "FAIL",
         };
         let resource = event.resource_id.as_deref().unwrap_or("-");
-        fmt.table_row(&[&ts, &action, result, resource]);
+        fmt.table_row(&[&ts, action, result, resource]);
     }
 
     Ok(())
 }
 
 /// Parse a duration string like "1h", "24h", "7d" into an epoch-seconds cutoff.
+#[allow(clippy::ref_option)]
 fn parse_since(since: &Option<String>) -> anyhow::Result<Option<i64>> {
-    let since = match since {
-        Some(s) => s,
-        None => return Ok(None),
-    };
+    let Some(since) = since else { return Ok(None) };
 
     let (num_str, multiplier) = if let Some(n) = since.strip_suffix('d') {
         (n, 86400i64)
@@ -114,14 +121,13 @@ fn parse_since(since: &Option<String>) -> anyhow::Result<Option<i64>> {
         (n, 60i64)
     } else {
         return Err(anyhow::anyhow!(
-            "invalid duration format '{}': expected e.g. '1h', '24h', '7d'",
-            since
+            "invalid duration format '{since}': expected e.g. '1h', '24h', '7d'"
         ));
     };
 
     let num: i64 = num_str
         .parse()
-        .map_err(|_| anyhow::anyhow!("invalid number in duration '{}'", since))?;
+        .map_err(|_| anyhow::anyhow!("invalid number in duration '{since}'"))?;
 
     let now = chrono::Utc::now().timestamp();
     Ok(Some(now - num * multiplier))
@@ -147,11 +153,10 @@ fn parse_action(s: &str) -> anyhow::Result<AuditAction> {
         "session-expired" => Ok(AuditAction::SessionExpired),
         "session-invalid-token" => Ok(AuditAction::SessionInvalidToken),
         _ => Err(anyhow::anyhow!(
-            "unknown audit action '{}'. Valid actions: vault-init, vault-unlock, vault-lock, \
+            "unknown audit action '{s}'. Valid actions: vault-init, vault-unlock, vault-lock, \
              vault-passphrase-change, entry-create, entry-read, entry-update, entry-delete, \
              ssh-sign, ssh-list-keys, git-sign, session-create, session-resume, \
-             session-destroy, session-expired, session-invalid-token",
-            s
+             session-destroy, session-expired, session-invalid-token"
         )),
     }
 }
@@ -207,7 +212,7 @@ mod tests {
         assert!(result.is_some());
         let cutoff = result.unwrap();
         let now = chrono::Utc::now().timestamp();
-        assert!((now - cutoff - 604800).abs() < 2);
+        assert!((now - cutoff - 604_800).abs() < 2);
     }
 
     #[test]

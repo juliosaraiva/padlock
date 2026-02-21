@@ -6,10 +6,14 @@
 //!
 //! # Parameters
 //!
-//! Production parameters (tuned for ~2-3 second derivation):
-//! - Memory: 1 GiB (1,048,576 KiB)
-//! - Time cost: 2 iterations
+//! Production parameters (tuned for ~500ms-1s in release builds):
+//! - Memory: 256 MiB (262,144 KiB)
+//! - Time cost: 3 iterations
 //! - Parallelism: 4 threads
+//!
+//! These parameters are well above OWASP recommendations (46 MiB minimum)
+//! and above industry norms (`KeePassXC`: 64 MiB, `1Password`: ~100 MiB).
+//! The higher iteration count compensates for the reduced memory cost.
 //!
 //! Test parameters (fast, for unit tests):
 //! - Memory: 64 KiB
@@ -28,11 +32,11 @@ pub const SALT_LENGTH: usize = 16;
 /// Output key length for PDK in bytes (256 bits).
 pub const PDK_LENGTH: usize = 32;
 
-/// Argon2id memory cost in KiB for production (1 GiB).
-pub const ARGON2_MEMORY_KIB: u32 = 1_048_576;
+/// Argon2id memory cost in KiB for production (256 MiB).
+pub const ARGON2_MEMORY_KIB: u32 = 262_144;
 
 /// Argon2id time cost (iterations) for production.
-pub const ARGON2_TIME_COST: u32 = 2;
+pub const ARGON2_TIME_COST: u32 = 3;
 
 /// Argon2id parallelism (threads) for production.
 pub const ARGON2_PARALLELISM: u32 = 4;
@@ -49,8 +53,8 @@ const TEST_ARGON2_PARALLELISM: u32 = 1;
 /// Derive the Primary Derivation Key (PDK) from a passphrase and salt.
 ///
 /// Uses Argon2id with memory-hard parameters to produce a 256-bit key.
-/// In production, this operation intentionally takes approximately 2-3
-/// seconds to complete, making brute-force attacks impractical.
+/// In production, this operation intentionally takes approximately 500ms-1s
+/// in release builds, making brute-force attacks impractical.
 ///
 /// # Arguments
 ///
