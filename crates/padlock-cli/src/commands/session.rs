@@ -44,6 +44,10 @@ pub struct SessionDestroyCmd {
 }
 
 /// Execute the session command group.
+///
+/// # Errors
+///
+/// Returns an error if the session operation fails.
 pub fn run(cmd: SessionCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
     match cmd.command {
         SessionSubcommand::Status(_) => run_status(vault_path, json),
@@ -53,22 +57,19 @@ pub fn run(cmd: SessionCmd, vault_path: &str, json: bool) -> anyhow::Result<()> 
 
 /// Query the daemon for session status using the stored token.
 fn run_status(vault_path: &str, json: bool) -> anyhow::Result<()> {
-    let token = match read_session_token(vault_path) {
-        Some(t) => t,
-        None => {
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "active": false,
-                        "reason": "no session token found",
-                    }))?
-                );
-            } else {
-                println!("No active session.");
-            }
-            return Ok(());
+    let Some(token) = read_session_token(vault_path) else {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "active": false,
+                    "reason": "no session token found",
+                }))?
+            );
+        } else {
+            println!("No active session.");
         }
+        return Ok(());
     };
 
     let socket = agent_socket_path_for_session(vault_path);
@@ -162,6 +163,7 @@ fn run_status(vault_path: &str, json: bool) -> anyhow::Result<()> {
 }
 
 /// Destroy the current session or all sessions.
+#[allow(clippy::needless_pass_by_value)]
 fn run_destroy(cmd: SessionDestroyCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
     if cmd.all {
         // Destroy all sessions via the daemon

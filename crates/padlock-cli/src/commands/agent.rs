@@ -66,19 +66,19 @@ pub struct AgentListCmd {}
 /// Get the agent socket path from the vault path.
 fn agent_socket_path(vault_path: &str) -> PathBuf {
     let vault = resolve_vault_path(vault_path);
-    vault
-        .parent()
-        .map(|p| p.join("agent.sock"))
-        .unwrap_or_else(|| PathBuf::from("/tmp/padlock-agent.sock"))
+    vault.parent().map_or_else(
+        || PathBuf::from("/tmp/padlock-agent.sock"),
+        |p| p.join("agent.sock"),
+    )
 }
 
 /// Get the agent PID file path.
 fn agent_pid_path(vault_path: &str) -> PathBuf {
     let vault = resolve_vault_path(vault_path);
-    vault
-        .parent()
-        .map(|p| p.join("agent.pid"))
-        .unwrap_or_else(|| PathBuf::from("/tmp/padlock-agent.pid"))
+    vault.parent().map_or_else(
+        || PathBuf::from("/tmp/padlock-agent.pid"),
+        |p| p.join("agent.pid"),
+    )
 }
 
 /// Check if the agent is running by checking the PID file, process, and socket.
@@ -111,17 +111,25 @@ fn is_agent_running(vault_path: &str) -> bool {
 }
 
 /// Execute the agent command group.
+///
+/// # Errors
+///
+/// Returns an error if the subcommand fails.
 pub fn run(cmd: AgentCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
     match cmd.command {
         AgentSubcommand::Start(start) => run_start(start, vault_path, json),
         AgentSubcommand::Stop(_) => run_stop(vault_path, json),
         AgentSubcommand::Status(_) => run_status(vault_path, json),
-        AgentSubcommand::ShellEnv(_) => run_shell_env(vault_path),
+        AgentSubcommand::ShellEnv(_) => {
+            run_shell_env(vault_path);
+            Ok(())
+        }
         AgentSubcommand::List(_) => run_list(vault_path, json),
     }
 }
 
 /// Start the SSH agent daemon.
+#[allow(clippy::needless_pass_by_value)]
 fn run_start(cmd: AgentStartCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
     let socket_path = agent_socket_path(vault_path);
     let pid_path = agent_pid_path(vault_path);
@@ -243,7 +251,7 @@ async fn run_agent_foreground(
                 eprintln!("Agent error: {e}");
             }
         }
-        _ = async {
+        () = async {
             loop {
                 sweep_interval.tick().await;
                 let _ = sweep_store.sweep_expired();
@@ -392,10 +400,9 @@ fn run_status(vault_path: &str, json: bool) -> anyhow::Result<()> {
 }
 
 /// Print shell environment variables for agent integration.
-fn run_shell_env(vault_path: &str) -> anyhow::Result<()> {
+fn run_shell_env(vault_path: &str) {
     let socket_path = agent_socket_path(vault_path);
     println!("export SSH_AUTH_SOCK=\"{}\";", socket_path.display());
-    Ok(())
 }
 
 /// List keys loaded in the running agent.

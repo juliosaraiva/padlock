@@ -30,6 +30,10 @@ pub struct TotpGenerateCmd {
 }
 
 /// Execute the totp command.
+///
+/// # Errors
+///
+/// Returns an error if the TOTP subcommand fails.
 pub fn run(cmd: TotpCmd, vault_path: &str, json: bool, no_session: bool) -> anyhow::Result<()> {
     match cmd.command {
         TotpSubcommand::Generate(gen) => run_generate(gen, vault_path, json, no_session),
@@ -37,6 +41,7 @@ pub fn run(cmd: TotpCmd, vault_path: &str, json: bool, no_session: bool) -> anyh
 }
 
 /// Execute the totp generate subcommand.
+#[allow(clippy::needless_pass_by_value)]
 fn run_generate(
     cmd: TotpGenerateCmd,
     vault_path: &str,

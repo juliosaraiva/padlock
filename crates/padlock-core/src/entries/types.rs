@@ -157,7 +157,7 @@ impl EntryData {
 }
 
 /// Additional metadata for an entry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct EntryMeta {
     /// Last time this entry was accessed.
     pub last_accessed: Option<i64>,
@@ -165,16 +165,6 @@ pub struct EntryMeta {
     pub access_count: u64,
     /// Whether this entry is pinned by the user.
     pub pinned: bool,
-}
-
-impl Default for EntryMeta {
-    fn default() -> Self {
-        Self {
-            last_accessed: None,
-            access_count: 0,
-            pinned: false,
-        }
-    }
 }
 
 /// A single vault entry combining metadata with type-specific data.

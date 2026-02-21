@@ -34,7 +34,7 @@ pub enum VerifyResult {
     },
 }
 
-/// An entry in the allowed_signers file.
+/// An entry in the `allowed_signers` file.
 #[derive(Debug, Clone)]
 pub struct AllowedSigner {
     /// Email or identity pattern.
@@ -43,9 +43,9 @@ pub struct AllowedSigner {
     pub public_key: String,
 }
 
-/// Generate an allowed_signers file content from a list of signers.
+/// Generate an `allowed_signers` file content from a list of signers.
 ///
-/// The allowed_signers file is used by Git to verify SSH signatures.
+/// The `allowed_signers` file is used by Git to verify SSH signatures.
 /// Each line has the format: `<principal> <key-type> <base64-key>`
 #[must_use]
 pub fn generate_allowed_signers(signers: &[AllowedSigner]) -> String {
@@ -56,7 +56,7 @@ pub fn generate_allowed_signers(signers: &[AllowedSigner]) -> String {
         .join("\n")
 }
 
-/// Parse an allowed_signers file.
+/// Parse an `allowed_signers` file.
 ///
 /// # Errors
 ///

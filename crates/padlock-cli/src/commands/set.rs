@@ -34,6 +34,10 @@ pub struct SetCmd {
 }
 
 /// Execute the set command.
+///
+/// # Errors
+///
+/// Returns an error if vault access or entry creation fails.
 pub fn run(cmd: SetCmd, vault_path: &str, no_session: bool) -> anyhow::Result<()> {
     let (mut vault, storage) = open_vault_mut_with_session(vault_path, no_session)?;
 

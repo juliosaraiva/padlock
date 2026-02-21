@@ -40,6 +40,11 @@ pub struct RecoveryDisableCmd {}
 pub struct RecoveryStatusCmd {}
 
 /// Execute the recovery command group.
+///
+/// # Errors
+///
+/// Returns an error if the recovery operation fails.
+#[allow(clippy::needless_pass_by_value)]
 pub fn run(cmd: RecoveryCmd, vault_path: &str, no_session: bool) -> anyhow::Result<()> {
     match cmd.command {
         RecoveryCommands::Enable(_) => run_enable(vault_path, no_session),

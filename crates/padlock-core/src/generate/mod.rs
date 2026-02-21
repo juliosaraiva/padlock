@@ -17,6 +17,7 @@ use crate::error::{Error, GenerateError};
 
 /// Policy for password generation.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct PasswordPolicy {
     /// Password length.
     pub length: usize,
@@ -95,10 +96,8 @@ pub fn estimate_strength(password: &str) -> u8 {
     match (len, variety) {
         (0..=7, _) => 0,
         (8..=11, 0..=1) => 1,
-        (8..=11, _) => 2,
-        (12..=15, 0..=2) => 2,
-        (12..=15, _) => 3,
-        (_, 0..=2) => 3,
+        (8..=11, _) | (12..=15, 0..=2) => 2,
+        (12..=15, _) | (_, 0..=2) => 3,
         _ => 4,
     }
 }
@@ -177,7 +176,9 @@ fn generate_totp_code_at(
     let modulus = 10u32.pow(digits);
     let code = binary % modulus;
 
-    let seconds_remaining = period - (unix_time % u64::from(period)) as u32;
+    let seconds_remaining = period
+        - u32::try_from(unix_time % u64::from(period))
+            .expect("remainder is always less than period which fits in u32");
 
     Ok((
         format!("{code:0>width$}", width = digits as usize),

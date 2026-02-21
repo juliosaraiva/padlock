@@ -12,6 +12,10 @@ use crate::output::OutputFormatter;
 pub struct StatusCmd {}
 
 /// Execute the status command.
+///
+/// # Errors
+///
+/// Returns an error if vault status check fails.
 pub fn run(vault_path: &str, fmt: &OutputFormatter) -> anyhow::Result<()> {
     let path = resolve_vault_path(vault_path);
     let storage = FilesystemBackend::new(path.clone());

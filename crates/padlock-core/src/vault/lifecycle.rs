@@ -107,7 +107,7 @@ impl Vault {
 
         let salt = generate_argon2_salt();
         let vault_uuid = uuid::Uuid::new_v4();
-        let now = Timestamp::now().as_epoch_secs() as u64;
+        let now = u64::try_from(Timestamp::now().as_epoch_secs()).unwrap_or(0);
 
         let header = VaultHeader::new(
             salt,
@@ -371,12 +371,16 @@ impl Vault {
     /// # Errors
     ///
     /// Returns `VaultError::Locked` if the vault is locked.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `data.len()` exceeds `u32::MAX` (not possible for valid entries).
     pub fn append_to_entries_blob(&mut self, data: &[u8]) -> crate::error::Result<(u64, u32)> {
         if self.state != VaultState::Unlocked {
             return Err(Error::Vault(VaultError::Locked));
         }
         let offset = self.entries_blob.len() as u64;
-        let length = data.len() as u32;
+        let length = u32::try_from(data.len()).expect("entry data length fits in u32");
         self.entries_blob.extend_from_slice(data);
         Ok((offset, length))
     }
@@ -391,6 +395,11 @@ impl Vault {
     ///
     /// Returns `VaultError::Locked` if the vault is locked.
     /// Returns errors if serialization or storage write fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the entry count, index length, or blob length exceeds
+    /// `u32::MAX` (not possible in practice).
     pub fn write_to_storage(&mut self, storage: &dyn StorageBackend) -> crate::error::Result<()> {
         let mackey = self
             .mackey
@@ -401,11 +410,16 @@ impl Vault {
         let index_bytes = serialize_index(&self.index)?;
 
         // Update header counts and lengths
-        self.header.entry_count = self.index.active_count() as u32;
-        self.header.deleted_entry_count = self.index.deleted_count() as u32;
-        self.header.vault_index_length = index_bytes.len() as u32;
-        self.header.entries_blob_length = self.entries_blob.len() as u32;
-        self.header.modified_timestamp = Timestamp::now().as_epoch_secs() as u64;
+        self.header.entry_count =
+            u32::try_from(self.index.active_count()).expect("entry count fits in u32");
+        self.header.deleted_entry_count =
+            u32::try_from(self.index.deleted_count()).expect("deleted count fits in u32");
+        self.header.vault_index_length =
+            u32::try_from(index_bytes.len()).expect("index length fits in u32");
+        self.header.entries_blob_length =
+            u32::try_from(self.entries_blob.len()).expect("entries blob length fits in u32");
+        self.header.modified_timestamp =
+            u64::try_from(Timestamp::now().as_epoch_secs()).unwrap_or(0);
 
         // Serialize header
         let header_bytes = serialize_header(&self.header);
@@ -428,6 +442,11 @@ impl Vault {
     ///
     /// Returns `VaultError::Locked` if the vault is locked.
     /// Returns `VaultError::CorruptedData` if any entry offset is out of bounds.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal index is inconsistent (entry present in live list
+    /// but missing from the index map — this is a programming error).
     pub fn compact_entries_blob(&mut self) -> crate::error::Result<()> {
         if self.state != VaultState::Unlocked {
             return Err(Error::Vault(VaultError::Locked));
@@ -445,8 +464,13 @@ impl Vault {
             .collect();
 
         for uuid in &live_entries {
-            let meta = self.index.entries.get(uuid).unwrap();
-            let start = meta.entry_offset as usize;
+            let meta = self
+                .index
+                .entries
+                .get(uuid)
+                .expect("uuid from live_entries must exist in index");
+            let start = usize::try_from(meta.entry_offset)
+                .map_err(|_| Error::Vault(VaultError::CorruptedData))?;
             let end = start + meta.entry_length as usize;
             if end > self.entries_blob.len() {
                 return Err(Error::Vault(VaultError::CorruptedData));
@@ -455,7 +479,11 @@ impl Vault {
             new_blob.extend_from_slice(&self.entries_blob[start..end]);
 
             // Update offset in index
-            let meta_mut = self.index.entries.get_mut(uuid).unwrap();
+            let meta_mut = self
+                .index
+                .entries
+                .get_mut(uuid)
+                .expect("uuid from live_entries must exist in index");
             meta_mut.entry_offset = new_offset;
         }
 
@@ -474,6 +502,11 @@ impl Vault {
     /// # Errors
     ///
     /// Returns `VaultError::Locked` if the vault is locked.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the re-encrypted entry length exceeds `u32::MAX` (not
+    /// possible in practice for valid entries).
     pub fn change_passphrase(
         &mut self,
         new_passphrase: &str,
@@ -518,7 +551,7 @@ impl Vault {
                 .map(|m| {
                     (
                         m.uuid,
-                        m.entry_offset as usize,
+                        usize::try_from(m.entry_offset).unwrap_or(usize::MAX),
                         m.entry_length as usize,
                         m.deleted,
                     )
@@ -537,7 +570,8 @@ impl Vault {
                 let new_encrypted = crate::vault::entries::encrypt_entry(&plaintext, &new_kek)?;
 
                 let new_offset = new_entries_blob.len() as u64;
-                let new_length = new_encrypted.len() as u32;
+                let new_length =
+                    u32::try_from(new_encrypted.len()).expect("entry length fits in u32");
                 new_entries_blob.extend_from_slice(&new_encrypted);
 
                 if let Some(entry_meta) = self.index.entries.get_mut(uuid) {
@@ -810,9 +844,9 @@ mod tests {
         let kek = vault.kek().unwrap();
         let encrypted = encrypt_entry(b"my secret data", kek).unwrap();
         let entry_uuid = [0x42; 16];
-        let now = Timestamp::now().as_epoch_secs() as u64;
+        let now = u64::try_from(Timestamp::now().as_epoch_secs()).unwrap_or(0);
 
-        let entry_len = encrypted.len() as u32;
+        let entry_len = u32::try_from(encrypted.len()).expect("fits in u32");
         vault.index_mut().unwrap().entries.insert(
             entry_uuid,
             crate::vault::format::EntryMetadata {
@@ -833,8 +867,9 @@ mod tests {
         let vault2 = Vault::open("pass", &storage, &params).unwrap();
         assert_eq!(vault2.index().entries.len(), 1);
         let meta = vault2.index().entries.get(&entry_uuid).unwrap();
-        let blob = &vault2.entries_blob()
-            [meta.entry_offset as usize..meta.entry_offset as usize + meta.entry_length as usize];
+        let offset = usize::try_from(meta.entry_offset).expect("fits in usize");
+        let len = usize::try_from(meta.entry_length).expect("fits in usize");
+        let blob = &vault2.entries_blob()[offset..offset + len];
         let decrypted = decrypt_entry(blob, vault2.kek().unwrap()).unwrap();
         assert_eq!(decrypted, b"my secret data");
     }
@@ -866,8 +901,8 @@ mod tests {
         let kek = vault.kek().unwrap();
         let encrypted = encrypt_entry(b"preserved data", kek).unwrap();
         let entry_uuid = [0x99; 16];
-        let now = Timestamp::now().as_epoch_secs() as u64;
-        let entry_len = encrypted.len() as u32;
+        let now = u64::try_from(Timestamp::now().as_epoch_secs()).unwrap_or(0);
+        let entry_len = u32::try_from(encrypted.len()).expect("fits in u32");
         vault.index_mut().unwrap().entries.insert(
             entry_uuid,
             crate::vault::format::EntryMetadata {
@@ -896,8 +931,9 @@ mod tests {
         // New passphrase should work and data is preserved
         let vault2 = Vault::open("new-pass", &storage, &params).unwrap();
         let meta = vault2.index().entries.get(&entry_uuid).unwrap();
-        let blob = &vault2.entries_blob()
-            [meta.entry_offset as usize..meta.entry_offset as usize + meta.entry_length as usize];
+        let offset = usize::try_from(meta.entry_offset).expect("fits in usize");
+        let len = usize::try_from(meta.entry_length).expect("fits in usize");
+        let blob = &vault2.entries_blob()[offset..offset + len];
         let decrypted = decrypt_entry(blob, vault2.kek().unwrap()).unwrap();
         assert_eq!(decrypted, b"preserved data");
     }
@@ -936,7 +972,7 @@ mod tests {
         let mut vault = Vault::init("pass", &storage, &test_params()).unwrap();
 
         let kek = vault.kek().unwrap();
-        let now = Timestamp::now().as_epoch_secs() as u64;
+        let now = u64::try_from(Timestamp::now().as_epoch_secs()).unwrap_or(0);
 
         // Add three entries
         let enc1 = encrypt_entry(b"data-1", kek).unwrap();
@@ -997,8 +1033,8 @@ mod tests {
 
         for uuid in [uuid1, uuid3] {
             let meta = vault.index().entries.get(&uuid).unwrap();
-            let start = meta.entry_offset as usize;
-            let end = start + meta.entry_length as usize;
+            let start = usize::try_from(meta.entry_offset).expect("fits in usize");
+            let end = start + usize::try_from(meta.entry_length).expect("fits in usize");
             let decrypted =
                 decrypt_entry(&vault.entries_blob()[start..end], vault.kek().unwrap()).unwrap();
             assert!(decrypted.starts_with(b"data-"));
@@ -1073,8 +1109,8 @@ mod tests {
         let kek = vault.kek().unwrap();
         let encrypted = encrypt_entry(b"my data", kek).unwrap();
         let entry_uuid = [0x77; 16];
-        let now = Timestamp::now().as_epoch_secs() as u64;
-        let entry_len = encrypted.len() as u32;
+        let now = u64::try_from(Timestamp::now().as_epoch_secs()).unwrap_or(0);
+        let entry_len = u32::try_from(encrypted.len()).expect("fits in u32");
         vault.index_mut().unwrap().entries.insert(
             entry_uuid,
             crate::vault::format::EntryMetadata {
@@ -1103,8 +1139,9 @@ mod tests {
         // Open with new passphrase should work
         let vault2 = Vault::open("new-pass", &storage, &params).unwrap();
         let meta = vault2.index().entries.get(&entry_uuid).unwrap();
-        let blob = &vault2.entries_blob()
-            [meta.entry_offset as usize..meta.entry_offset as usize + meta.entry_length as usize];
+        let offset = usize::try_from(meta.entry_offset).expect("fits in usize");
+        let len = usize::try_from(meta.entry_length).expect("fits in usize");
+        let blob = &vault2.entries_blob()[offset..offset + len];
         let decrypted = decrypt_entry(blob, vault2.kek().unwrap()).unwrap();
         assert_eq!(decrypted, b"my data");
     }
