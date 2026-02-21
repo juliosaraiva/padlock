@@ -78,7 +78,9 @@ pub fn run(cmd: ExecCmd, vault_path: &str, no_session: bool) -> anyhow::Result<(
 /// Extract the secret value from an entry as a string.
 fn extract_secret(data: &EntryData, name: &str) -> anyhow::Result<String> {
     match data {
-        EntryData::Credential { password, .. } | EntryData::Netrc { password, .. } => Ok(password.clone()),
+        EntryData::Credential { password, .. } | EntryData::Netrc { password, .. } => {
+            Ok(password.clone())
+        }
         EntryData::TOTP { secret, .. } => Ok(secret.clone()),
         EntryData::SSHKey { private_key, .. } => Ok(private_key.clone()),
         EntryData::Binary { data, .. } => String::from_utf8(data.clone())

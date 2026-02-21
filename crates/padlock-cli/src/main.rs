@@ -34,7 +34,9 @@ fn determine_exit_code(err: &anyhow::Error) -> i32 {
                 padlock_core::error::VaultError::RecoveryNotEnabled => 6,
                 _ => 1,
             },
-            padlock_core::error::Error::Entry(padlock_core::error::EntryError::NotFound { .. }) => 3,
+            padlock_core::error::Error::Entry(padlock_core::error::EntryError::NotFound {
+                ..
+            }) => 3,
             padlock_core::error::Error::Agent(padlock_core::error::AgentError::NotRunning) => 10,
             _ => 1,
         }

@@ -410,11 +410,16 @@ impl Vault {
         let index_bytes = serialize_index(&self.index)?;
 
         // Update header counts and lengths
-        self.header.entry_count = u32::try_from(self.index.active_count()).expect("entry count fits in u32");
-        self.header.deleted_entry_count = u32::try_from(self.index.deleted_count()).expect("deleted count fits in u32");
-        self.header.vault_index_length = u32::try_from(index_bytes.len()).expect("index length fits in u32");
-        self.header.entries_blob_length = u32::try_from(self.entries_blob.len()).expect("entries blob length fits in u32");
-        self.header.modified_timestamp = u64::try_from(Timestamp::now().as_epoch_secs()).unwrap_or(0);
+        self.header.entry_count =
+            u32::try_from(self.index.active_count()).expect("entry count fits in u32");
+        self.header.deleted_entry_count =
+            u32::try_from(self.index.deleted_count()).expect("deleted count fits in u32");
+        self.header.vault_index_length =
+            u32::try_from(index_bytes.len()).expect("index length fits in u32");
+        self.header.entries_blob_length =
+            u32::try_from(self.entries_blob.len()).expect("entries blob length fits in u32");
+        self.header.modified_timestamp =
+            u64::try_from(Timestamp::now().as_epoch_secs()).unwrap_or(0);
 
         // Serialize header
         let header_bytes = serialize_header(&self.header);
@@ -459,8 +464,13 @@ impl Vault {
             .collect();
 
         for uuid in &live_entries {
-            let meta = self.index.entries.get(uuid).expect("uuid from live_entries must exist in index");
-            let start = usize::try_from(meta.entry_offset).map_err(|_| Error::Vault(VaultError::CorruptedData))?;
+            let meta = self
+                .index
+                .entries
+                .get(uuid)
+                .expect("uuid from live_entries must exist in index");
+            let start = usize::try_from(meta.entry_offset)
+                .map_err(|_| Error::Vault(VaultError::CorruptedData))?;
             let end = start + meta.entry_length as usize;
             if end > self.entries_blob.len() {
                 return Err(Error::Vault(VaultError::CorruptedData));
@@ -469,7 +479,11 @@ impl Vault {
             new_blob.extend_from_slice(&self.entries_blob[start..end]);
 
             // Update offset in index
-            let meta_mut = self.index.entries.get_mut(uuid).expect("uuid from live_entries must exist in index");
+            let meta_mut = self
+                .index
+                .entries
+                .get_mut(uuid)
+                .expect("uuid from live_entries must exist in index");
             meta_mut.entry_offset = new_offset;
         }
 
@@ -556,7 +570,8 @@ impl Vault {
                 let new_encrypted = crate::vault::entries::encrypt_entry(&plaintext, &new_kek)?;
 
                 let new_offset = new_entries_blob.len() as u64;
-                let new_length = u32::try_from(new_encrypted.len()).expect("entry length fits in u32");
+                let new_length =
+                    u32::try_from(new_encrypted.len()).expect("entry length fits in u32");
                 new_entries_blob.extend_from_slice(&new_encrypted);
 
                 if let Some(entry_meta) = self.index.entries.get_mut(uuid) {

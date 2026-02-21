@@ -88,7 +88,8 @@ pub fn read_entry(vault: &Vault, id: &EntryId) -> crate::error::Result<Entry> {
         .filter(|m| !m.deleted)
         .ok_or_else(|| Error::Entry(EntryError::NotFound { id: id.to_string() }))?;
 
-    let offset = usize::try_from(meta.entry_offset).map_err(|_| Error::Vault(VaultError::CorruptedData))?;
+    let offset =
+        usize::try_from(meta.entry_offset).map_err(|_| Error::Vault(VaultError::CorruptedData))?;
     let length = meta.entry_length as usize;
     let blob = vault.entries_blob();
 
@@ -240,7 +241,9 @@ pub fn search_by_name(vault: &Vault, query: &str) -> crate::error::Result<Vec<En
             continue;
         }
         if contains_case_insensitive(&meta.title, query) {
-            let Ok(offset) = usize::try_from(meta.entry_offset) else { continue };
+            let Ok(offset) = usize::try_from(meta.entry_offset) else {
+                continue;
+            };
             let length = meta.entry_length as usize;
             let blob = vault.entries_blob();
             if offset + length <= blob.len() {
@@ -283,7 +286,9 @@ pub fn search_by_tag(vault: &Vault, tag: &str) -> crate::error::Result<Vec<Entry
                 if m.deleted {
                     continue;
                 }
-                let Ok(offset) = usize::try_from(m.entry_offset) else { continue };
+                let Ok(offset) = usize::try_from(m.entry_offset) else {
+                    continue;
+                };
                 let length = m.entry_length as usize;
                 let blob = vault.entries_blob();
                 if offset + length <= blob.len() {
@@ -305,7 +310,9 @@ pub fn search_by_tag(vault: &Vault, tag: &str) -> crate::error::Result<Vec<Entry
         if meta.deleted {
             continue;
         }
-        let Ok(offset) = usize::try_from(meta.entry_offset) else { continue };
+        let Ok(offset) = usize::try_from(meta.entry_offset) else {
+            continue;
+        };
         let length = meta.entry_length as usize;
         let blob = vault.entries_blob();
         if offset + length <= blob.len() {

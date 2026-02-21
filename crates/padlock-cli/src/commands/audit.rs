@@ -36,8 +36,10 @@ pub struct AuditCmd {
 /// Returns an error if audit log reading or filtering fails.
 #[allow(clippy::needless_pass_by_value)]
 pub fn run(cmd: AuditCmd, vault_path: &str, fmt: &OutputFormatter) -> anyhow::Result<()> {
-    let padlock_dir = super::resolve_vault_path(vault_path)
-        .parent().map_or_else(|| dirs::home_dir().unwrap().join(".padlock"), std::path::Path::to_path_buf);
+    let padlock_dir = super::resolve_vault_path(vault_path).parent().map_or_else(
+        || dirs::home_dir().unwrap().join(".padlock"),
+        std::path::Path::to_path_buf,
+    );
 
     let audit_path = padlock_dir.join("audit.jsonl");
     let log = JsonLinesAuditLog::new(&audit_path)?;

@@ -168,10 +168,7 @@ impl AgentHandler {
     /// Unix socket. The socket is secured by filesystem permissions (0o600),
     /// which restricts access to the same user. Transit encryption is only
     /// used for the `ResumeSession` response path (daemon→CLI).
-    fn handle_session_create(
-        store: &SessionStore,
-        req: CreateSessionRequest,
-    ) -> AgentResponse {
+    fn handle_session_create(store: &SessionStore, req: CreateSessionRequest) -> AgentResponse {
         // Validate algorithm
         let Some(algorithm) = SessionAlgorithm::from_byte(req.algorithm) else {
             return AgentResponse::Failure;
@@ -218,10 +215,7 @@ impl AgentHandler {
     }
 
     /// Handle a `ResumeSession` request.
-    fn handle_session_resume(
-        store: &SessionStore,
-        req: ResumeSessionRequest,
-    ) -> AgentResponse {
+    fn handle_session_resume(store: &SessionStore, req: ResumeSessionRequest) -> AgentResponse {
         // Validate token
         let token: [u8; SESSION_TOKEN_SIZE] = match req.token.try_into() {
             Ok(t) => t,
@@ -240,7 +234,8 @@ impl AgentHandler {
         };
 
         // Derive transit key (responder side)
-        let Ok((responder_pubkey, transit_key)) = responder_derive_transit(&initiator_pubkey) else {
+        let Ok((responder_pubkey, transit_key)) = responder_derive_transit(&initiator_pubkey)
+        else {
             return AgentResponse::Failure;
         };
 
@@ -269,10 +264,7 @@ impl AgentHandler {
     }
 
     /// Handle a `DestroySession` request.
-    fn handle_session_destroy(
-        store: &SessionStore,
-        req: DestroySessionRequest,
-    ) -> AgentResponse {
+    fn handle_session_destroy(store: &SessionStore, req: DestroySessionRequest) -> AgentResponse {
         let token: [u8; SESSION_TOKEN_SIZE] = match req.token.try_into() {
             Ok(t) => t,
             Err(_) => return AgentResponse::Failure,
@@ -288,10 +280,7 @@ impl AgentHandler {
     }
 
     /// Handle a `SessionStatus` request.
-    fn handle_session_status(
-        store: &SessionStore,
-        req: StatusSessionRequest,
-    ) -> AgentResponse {
+    fn handle_session_status(store: &SessionStore, req: StatusSessionRequest) -> AgentResponse {
         let token: [u8; SESSION_TOKEN_SIZE] = match req.token.try_into() {
             Ok(t) => t,
             Err(_) => return AgentResponse::Failure,
@@ -356,9 +345,17 @@ impl AgentHandler {
         let sig_type = b"ssh-ed25519";
         let sig_bytes = signature.to_bytes();
         let mut blob = Vec::new();
-        blob.extend_from_slice(&u32::try_from(sig_type.len()).expect("sig_type length fits in u32").to_be_bytes());
+        blob.extend_from_slice(
+            &u32::try_from(sig_type.len())
+                .expect("sig_type length fits in u32")
+                .to_be_bytes(),
+        );
         blob.extend_from_slice(sig_type);
-        blob.extend_from_slice(&u32::try_from(sig_bytes.len()).expect("sig_bytes length fits in u32").to_be_bytes());
+        blob.extend_from_slice(
+            &u32::try_from(sig_bytes.len())
+                .expect("sig_bytes length fits in u32")
+                .to_be_bytes(),
+        );
         blob.extend_from_slice(&sig_bytes);
 
         AgentResponse::SignResponse { signature: blob }
@@ -378,9 +375,17 @@ mod tests {
         let key_type = b"ssh-ed25519";
         let pk_bytes = verifying_key.as_bytes();
         let mut blob = Vec::new();
-        blob.extend_from_slice(&u32::try_from(key_type.len()).expect("fits in u32").to_be_bytes());
+        blob.extend_from_slice(
+            &u32::try_from(key_type.len())
+                .expect("fits in u32")
+                .to_be_bytes(),
+        );
         blob.extend_from_slice(key_type);
-        blob.extend_from_slice(&u32::try_from(pk_bytes.len()).expect("fits in u32").to_be_bytes());
+        blob.extend_from_slice(
+            &u32::try_from(pk_bytes.len())
+                .expect("fits in u32")
+                .to_be_bytes(),
+        );
         blob.extend_from_slice(pk_bytes);
 
         LoadedKey {

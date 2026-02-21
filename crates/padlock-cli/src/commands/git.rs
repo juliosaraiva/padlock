@@ -287,7 +287,10 @@ fn run_allowed_signers(
     let output_path = if let Some(ref out) = cmd.output {
         std::path::PathBuf::from(out)
     } else {
-        path.parent().map_or_else(|| std::path::PathBuf::from("allowed_signers"), |p| p.join("allowed_signers"))
+        path.parent().map_or_else(
+            || std::path::PathBuf::from("allowed_signers"),
+            |p| p.join("allowed_signers"),
+        )
     };
 
     if let Some(parent) = output_path.parent() {

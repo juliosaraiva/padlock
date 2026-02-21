@@ -142,7 +142,8 @@ pub fn prompt_passphrase(prompt: &str) -> anyhow::Result<String> {
 /// Get the padlock directory from the vault path.
 fn padlock_dir(vault_path: &str) -> PathBuf {
     let path = resolve_vault_path(vault_path);
-    path.parent().map_or_else(|| PathBuf::from("~/.padlock"), PathBuf::from)
+    path.parent()
+        .map_or_else(|| PathBuf::from("~/.padlock"), PathBuf::from)
 }
 
 /// Get the session token file path.
@@ -397,7 +398,9 @@ pub(crate) fn ensure_daemon_running(vault_path: &str) -> bool {
     }
 
     // Auto-start the daemon as a background process
-    let Ok(exe) = std::env::current_exe() else { return false };
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
 
     // Remove stale PID file before spawning to prevent the child
     // from detecting itself via is_agent_running()
@@ -423,10 +426,9 @@ pub(crate) fn ensure_daemon_running(vault_path: &str) -> bool {
         // Poll for socket existence with 100ms intervals, max 3 seconds
         for _ in 0..30 {
             std::thread::sleep(std::time::Duration::from_millis(100));
-            if socket.exists()
-                && std::os::unix::net::UnixStream::connect(&socket).is_ok() {
-                    return true;
-                }
+            if socket.exists() && std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+                return true;
+            }
         }
     }
 
@@ -454,7 +456,9 @@ pub fn open_vault_with_session(vault_path: &str, no_session: bool) -> anyhow::Re
 
         // Try to resume from session cache
         if let Some((kek, mackey)) = try_resume_session(vault_path) {
-            if let Ok(vault) = Vault::open_with_keys(kek, mackey, &storage) { return Ok(vault) }
+            if let Ok(vault) = Vault::open_with_keys(kek, mackey, &storage) {
+                return Ok(vault);
+            }
             // Session keys are stale, fall through to passphrase
         }
     }
@@ -503,7 +507,9 @@ pub fn open_vault_mut_with_session(
 
         // Try to resume from session cache
         if let Some((kek, mackey)) = try_resume_session(vault_path) {
-            if let Ok(vault) = Vault::open_with_keys(kek, mackey, &storage) { return Ok((vault, storage)) }
+            if let Ok(vault) = Vault::open_with_keys(kek, mackey, &storage) {
+                return Ok((vault, storage));
+            }
             // Fall through
         }
     }
@@ -534,11 +540,13 @@ pub fn open_vault_mut_with_session(
 
 /// Hex-encode bytes to lowercase hex string.
 fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-        use std::fmt::Write;
-        let _ = write!(s, "{b:02x}");
-        s
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            use std::fmt::Write;
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }
 
 /// Decode a 32-byte hex string to a fixed-size array.

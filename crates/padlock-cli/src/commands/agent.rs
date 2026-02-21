@@ -66,15 +66,19 @@ pub struct AgentListCmd {}
 /// Get the agent socket path from the vault path.
 fn agent_socket_path(vault_path: &str) -> PathBuf {
     let vault = resolve_vault_path(vault_path);
-    vault
-        .parent().map_or_else(|| PathBuf::from("/tmp/padlock-agent.sock"), |p| p.join("agent.sock"))
+    vault.parent().map_or_else(
+        || PathBuf::from("/tmp/padlock-agent.sock"),
+        |p| p.join("agent.sock"),
+    )
 }
 
 /// Get the agent PID file path.
 fn agent_pid_path(vault_path: &str) -> PathBuf {
     let vault = resolve_vault_path(vault_path);
-    vault
-        .parent().map_or_else(|| PathBuf::from("/tmp/padlock-agent.pid"), |p| p.join("agent.pid"))
+    vault.parent().map_or_else(
+        || PathBuf::from("/tmp/padlock-agent.pid"),
+        |p| p.join("agent.pid"),
+    )
 }
 
 /// Check if the agent is running by checking the PID file, process, and socket.

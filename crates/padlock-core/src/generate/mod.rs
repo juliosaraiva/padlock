@@ -176,8 +176,9 @@ fn generate_totp_code_at(
     let modulus = 10u32.pow(digits);
     let code = binary % modulus;
 
-    let seconds_remaining = period - u32::try_from(unix_time % u64::from(period))
-        .expect("remainder is always less than period which fits in u32");
+    let seconds_remaining = period
+        - u32::try_from(unix_time % u64::from(period))
+            .expect("remainder is always less than period which fits in u32");
 
     Ok((
         format!("{code:0>width$}", width = digits as usize),

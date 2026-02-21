@@ -296,9 +296,17 @@ pub fn build_extension_message(session_payload: &[u8]) -> Vec<u8> {
     let payload_len = 1 + 4 + name_bytes.len() + session_payload.len();
 
     let mut msg = Vec::with_capacity(4 + payload_len);
-    msg.extend_from_slice(&u32::try_from(payload_len).expect("payload length fits in u32").to_be_bytes());
+    msg.extend_from_slice(
+        &u32::try_from(payload_len)
+            .expect("payload length fits in u32")
+            .to_be_bytes(),
+    );
     msg.push(SSH_AGENTC_EXTENSION);
-    msg.extend_from_slice(&u32::try_from(name_bytes.len()).expect("name length fits in u32").to_be_bytes());
+    msg.extend_from_slice(
+        &u32::try_from(name_bytes.len())
+            .expect("name length fits in u32")
+            .to_be_bytes(),
+    );
     msg.extend_from_slice(name_bytes);
     msg.extend_from_slice(session_payload);
     msg
