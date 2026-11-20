@@ -439,7 +439,7 @@ mod tests {
         let handler = AgentHandler::new();
         let response = handler.handle_message(&AgentMessage::RequestIdentities);
         match response {
-            AgentResponse::IdentitiesAnswer { keys } => assert!(keys.is_empty()),
+            AgentResponse::IdentitiesAnswer { keys } => assert_eq!(keys, []),
             _ => panic!("expected IdentitiesAnswer"),
         }
     }
@@ -473,7 +473,7 @@ mod tests {
 
         match response {
             AgentResponse::SignResponse { signature } => {
-                assert!(!signature.is_empty());
+                assert_ne!(signature, [] as [u8; 0]);
             }
             _ => panic!("expected SignResponse"),
         }

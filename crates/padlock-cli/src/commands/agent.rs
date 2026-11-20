@@ -95,8 +95,7 @@ fn is_agent_running(vault_path: &str) -> bool {
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
+                .is_ok_and(|status| status.success());
             if !process_alive {
                 return false;
             }
