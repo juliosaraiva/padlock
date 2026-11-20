@@ -402,7 +402,7 @@ mod tests {
 
         delete_entry(&mut vault, &entry.id).unwrap();
         let list = list_entries(&vault).unwrap();
-        assert!(list.is_empty());
+        assert_eq!(list, []);
     }
 
     #[test]
