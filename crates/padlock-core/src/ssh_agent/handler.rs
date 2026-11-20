@@ -154,7 +154,7 @@ impl AgentHandler {
         };
 
         match request {
-            SessionRequest::Create(req) => Self::handle_session_create(store, req),
+            SessionRequest::Create(req) => Self::handle_session_create(store, &req),
             SessionRequest::Resume(req) => Self::handle_session_resume(store, req),
             SessionRequest::Destroy(req) => Self::handle_session_destroy(store, req),
             SessionRequest::Status(req) => Self::handle_session_status(store, req),
@@ -168,7 +168,7 @@ impl AgentHandler {
     /// Unix socket. The socket is secured by filesystem permissions (0o600),
     /// which restricts access to the same user. Transit encryption is only
     /// used for the `ResumeSession` response path (daemon→CLI).
-    fn handle_session_create(store: &SessionStore, req: CreateSessionRequest) -> AgentResponse {
+    fn handle_session_create(store: &SessionStore, req: &CreateSessionRequest) -> AgentResponse {
         // Validate algorithm
         let Some(algorithm) = SessionAlgorithm::from_byte(req.algorithm) else {
             return AgentResponse::Failure;
