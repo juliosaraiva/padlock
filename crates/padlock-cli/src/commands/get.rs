@@ -14,7 +14,7 @@ pub struct GetCmd {
 
     /// Only print the password/secret value.
     #[arg(short, long)]
-    password_only: bool,
+    pub(crate) password_only: bool,
 }
 
 /// Execute the get command.
@@ -51,7 +51,7 @@ pub fn run(
             "tags": entry.tags,
         });
         fmt.json(&output);
-    } else if cmd.password_only || fmt.is_quiet() {
+    } else if cmd.password_only {
         match &entry.data {
             padlock_core::entries::EntryData::Credential { password, .. }
             | padlock_core::entries::EntryData::Netrc { password, .. } => {
@@ -70,12 +70,11 @@ pub fn run(
         match &entry.data {
             padlock_core::entries::EntryData::Credential {
                 username,
-                password,
                 url,
                 notes,
+                ..
             } => {
                 fmt.key_value("Username", username);
-                fmt.key_value("Password", password);
                 if let Some(u) = url {
                     fmt.key_value("URL", u);
                 }

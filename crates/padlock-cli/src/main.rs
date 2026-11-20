@@ -10,11 +10,34 @@
 pub mod commands;
 pub mod output;
 
-use clap::Parser;
+use clap::{error::ErrorKind, CommandFactory, Parser};
 use commands::{Cli, Commands};
 
 fn main() {
-    let cli = Cli::parse();
+    let args: Vec<_> = std::env::args_os().collect();
+    let set_args = commands::set::set_arguments(&args[1..]);
+    if set_args.is_some_and(commands::set::contains_password_option) {
+        eprintln!("error: use the hidden prompt or --password-stdin for entry passwords");
+        std::process::exit(2);
+    }
+    let set_has_terminator = set_args.is_some_and(|args| args.iter().any(|arg| arg == "--"));
+    let cli = match Cli::try_parse_from(args) {
+        Ok(cli) => cli,
+        // Clap may interpolate rejected positional values into diagnostics.
+        Err(error) if set_has_terminator && error.use_stderr() => {
+            eprintln!("error: invalid set arguments; use --help for usage and --password-stdin for redirected passwords");
+            std::process::exit(error.exit_code());
+        }
+        Err(error) => error.exit(),
+    };
+    if cli.json && matches!(&cli.command, Commands::Get(cmd) if cmd.password_only) {
+        Cli::command()
+            .error(
+                ErrorKind::ArgumentConflict,
+                "--password-only conflicts with --json",
+            )
+            .exit();
+    }
     if let Err(e) = run(cli) {
         let exit_code = determine_exit_code(&e);
         eprintln!("error: {e}");

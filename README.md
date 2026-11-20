@@ -107,7 +107,7 @@ padlock completions fish > ~/.config/fish/completions/padlock.fish
 padlock init
 
 # Store a credential
-padlock set github -u myuser -p "ghp_xxxxxxxxxxxx"
+padlock set github -u myuser
 
 # Retrieve it
 padlock get github
@@ -124,6 +124,12 @@ padlock ls
 # Search by name or tag
 padlock search api
 ```
+
+Use the hidden entry prompt or pipe a secret producer into `padlock set github --password-stdin`.
+Both inputs accept up to 512 UTF-8 bytes. Stdin reads through EOF and preserves every byte, including any newline.
+The hidden prompt uses terminal line editing and input settings, including configured backspace and carriage-return handling. It removes the final newline. Ctrl-C cancels. Ctrl-Z restores the terminal before suspending and cancels the command when resumed.
+Replace legacy `set --password` and `set -p` invocations with one of these input modes.
+`padlock get github` shows metadata. Use `padlock get github --password-only` when a consumer explicitly needs the password on stdout.
 
 ## Usage
 
