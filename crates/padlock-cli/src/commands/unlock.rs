@@ -28,7 +28,7 @@ pub fn run(_cmd: UnlockCmd, vault_path: &str, json: bool, no_session: bool) -> a
     }
 
     let passphrase = prompt_passphrase("Passphrase: ")?;
-    let vault = Vault::open(&passphrase, &storage, &KdfParams::production())?;
+    let vault = Vault::open(&passphrase, &storage, &KdfParams::legacy_production())?;
 
     // Verify the vault opened successfully (passphrase was correct)
     let entry_count = vault.index().active_count();

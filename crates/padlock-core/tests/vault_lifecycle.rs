@@ -134,6 +134,109 @@ fn test_vault_open_preserves_uuid() {
     assert_eq!(vault2.header().vault_uuid, uuid1);
 }
 
+#[test]
+fn vault_rejects_untrusted_kdf_costs_before_authentication() {
+    use padlock_core::error::{CryptoError, Error};
+
+    let dir = TempDir::new().unwrap();
+    let backend = create_backend(&dir);
+    let params = test_params();
+    Vault::init("pass", &backend, &params).unwrap();
+    let original = std::fs::read(backend.vault_path()).unwrap();
+
+    for (memory, time, lanes) in [
+        (1_048_577_u32, 1_u32, 1_u32),
+        (64, 5, 1),
+        (64, 1, 5),
+        (1_048_576, 3, 4),
+        (0, 1, 1),
+        (64, 0, 1),
+        (64, 1, 0),
+        (8, 1, 4),
+    ] {
+        let mut bytes = original.clone();
+        bytes[76..80].copy_from_slice(&memory.to_le_bytes());
+        bytes[80..84].copy_from_slice(&time.to_le_bytes());
+        bytes[84..88].copy_from_slice(&lanes.to_le_bytes());
+        std::fs::write(backend.vault_path(), bytes).unwrap();
+        assert!(
+            matches!(
+                Vault::open("pass", &backend, &params),
+                Err(Error::Crypto(CryptoError::Argon2Error(_)))
+            ),
+            "{memory}/{time}/{lanes}"
+        );
+    }
+}
+
+#[test]
+fn vault_legacy_header_uses_fallback_and_rejects_authenticated_trailing_bytes() {
+    use padlock_core::crypto::hmac::{compute_hmac, HMAC_SIZE};
+    use padlock_core::error::{Error, VaultError};
+
+    let dir = TempDir::new().unwrap();
+    let backend = create_backend(&dir);
+    let params = test_params();
+    let vault = Vault::init("pass", &backend, &params).unwrap();
+    let mut bytes = std::fs::read(backend.vault_path()).unwrap();
+    bytes.truncate(bytes.len() - HMAC_SIZE);
+    bytes[76..88].fill(0);
+    let mac = compute_hmac(vault.mackey().unwrap(), &bytes);
+    let mut legacy = bytes.clone();
+    legacy.extend_from_slice(&mac);
+    std::fs::write(backend.vault_path(), legacy).unwrap();
+    assert!(Vault::open("pass", &backend, &params).is_ok());
+
+    bytes.push(0);
+    let mac = compute_hmac(vault.mackey().unwrap(), &bytes);
+    bytes.extend_from_slice(&mac);
+    std::fs::write(backend.vault_path(), bytes).unwrap();
+    assert!(matches!(
+        Vault::open("pass", &backend, &params),
+        Err(Error::Vault(VaultError::CorruptedData))
+    ));
+}
+
+#[test]
+fn vault_rejects_trailing_messagepack_inside_authenticated_index_on_all_open_paths() {
+    use padlock_core::crypto::hmac::{compute_hmac, HMAC_SIZE};
+    use padlock_core::crypto::secret_buf::SecretBuf;
+    use padlock_core::error::{Error, VaultError};
+    use padlock_core::vault::format::{parse_header, serialize_header, HEADER_SIZE};
+
+    let dir = TempDir::new().unwrap();
+    let backend = create_backend(&dir);
+    let params = test_params();
+    let mut vault = Vault::init("pass", &backend, &params).unwrap();
+    let recovery_key = vault.enable_recovery(&backend).unwrap();
+    let kek = vault.kek().unwrap();
+    let mackey = vault.mackey().unwrap();
+    let mut bytes = std::fs::read(backend.vault_path()).unwrap();
+    bytes.truncate(bytes.len() - HMAC_SIZE);
+    let mut header = parse_header(&bytes).unwrap();
+    bytes.insert(HEADER_SIZE + header.vault_index_length as usize, 0xC0);
+    header.vault_index_length += 1;
+    bytes[..HEADER_SIZE].copy_from_slice(&serialize_header(&header));
+    let mac = compute_hmac(mackey, &bytes);
+    bytes.extend_from_slice(&mac);
+    std::fs::write(backend.vault_path(), bytes).unwrap();
+
+    for result in [
+        Vault::open("pass", &backend, &params),
+        Vault::open_with_keys(
+            SecretBuf::from_bytes(kek),
+            SecretBuf::from_bytes(mackey),
+            &backend,
+        ),
+        Vault::recover(&recovery_key, &backend),
+    ] {
+        assert!(matches!(
+            result,
+            Err(Error::Vault(VaultError::InvalidFormat { reason })) if reason == "trailing bytes in vault index"
+        ));
+    }
+}
+
 // --- Data persistence across reopen ---
 
 #[test]

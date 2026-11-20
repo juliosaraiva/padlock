@@ -33,7 +33,7 @@ fn test_aead_roundtrip_empty_payload() {
     let ciphertext = aead_encrypt(&key, &nonce, &[], b"").unwrap();
     assert_eq!(ciphertext.len(), TAG_SIZE); // only tag, no data
     let plaintext = aead_decrypt(&key, &nonce, &[], &ciphertext).unwrap();
-    assert!(plaintext.is_empty());
+    assert_eq!(plaintext, [] as [u8; 0]);
 }
 
 #[test]

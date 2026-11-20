@@ -26,6 +26,7 @@ pub mod unlock;
 
 use std::io::{Read as IoRead, Write as IoWrite};
 use std::path::PathBuf;
+use zeroize::Zeroizing;
 
 use clap::{Parser, Subcommand};
 use padlock_core::crypto::secret_buf::SecretBuf;
@@ -264,16 +265,31 @@ fn try_resume_session(vault_path: &str) -> Option<(SecretBuf, SecretBuf)> {
 
     // Decrypt KEK and MACKEY using transit key
     let kek_nonce: [u8; 24] = resume_resp.kek_nonce.try_into().ok()?;
-    let kek_bytes = transit_decrypt(&transit_key, &kek_nonce, &resume_resp.encrypted_kek).ok()?;
+    let kek_bytes =
+        Zeroizing::new(transit_decrypt(&transit_key, &kek_nonce, &resume_resp.encrypted_kek).ok()?);
 
     let mackey_nonce: [u8; 24] = resume_resp.mackey_nonce.try_into().ok()?;
-    let mackey_bytes =
-        transit_decrypt(&transit_key, &mackey_nonce, &resume_resp.encrypted_mackey).ok()?;
+    let mackey_bytes = Zeroizing::new(
+        transit_decrypt(&transit_key, &mackey_nonce, &resume_resp.encrypted_mackey).ok()?,
+    );
 
     Some((
         SecretBuf::from_bytes(&kek_bytes),
         SecretBuf::from_bytes(&mackey_bytes),
     ))
+}
+
+// Keep key-bearing buffers scoped to the write, including early errors.
+fn write_create_request(
+    writer: &mut impl IoWrite,
+    req: CreateSessionRequest,
+) -> anyhow::Result<()> {
+    let payload = protocol::build_create_request(&req)?;
+    drop(req);
+    let frame = build_extension_message(&payload);
+    drop(payload);
+    writer.write_all(&frame)?;
+    Ok(())
 }
 
 /// Send `CreateSession` to the daemon to cache KEK and MACKEY.
@@ -298,11 +314,15 @@ fn create_daemon_session(
         return None;
     }
 
+    let mut stream = std::os::unix::net::UnixStream::connect(&socket).ok()?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .ok()?;
     let req = CreateSessionRequest {
         algorithm: SessionAlgorithm::XChaCha20Poly1305HkdfSha256.to_byte(),
-        encrypted_kek: kek.to_vec(),
+        encrypted_kek: SecretBuf::from_bytes(kek),
         kek_nonce: vec![0u8; 24],
-        encrypted_mackey: mackey.to_vec(),
+        encrypted_mackey: SecretBuf::from_bytes(mackey),
         mackey_nonce: vec![0u8; 24],
         ephemeral_pubkey: vec![0u8; 32],
         duration: duration.as_label().to_string(),
@@ -310,14 +330,7 @@ fn create_daemon_session(
         idle_timeout_secs,
     };
 
-    let session_payload = protocol::build_create_request(&req).ok()?;
-    let message = build_extension_message(&session_payload);
-
-    let mut stream = std::os::unix::net::UnixStream::connect(&socket).ok()?;
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .ok()?;
-    stream.write_all(&message).ok()?;
+    write_create_request(&mut stream, req).ok()?;
 
     // Read response
     let mut len_buf = [0u8; 4];
@@ -465,7 +478,7 @@ pub fn open_vault_with_session(vault_path: &str, no_session: bool) -> anyhow::Re
 
     // Fall back to passphrase prompt
     let passphrase = prompt_passphrase("Passphrase: ")?;
-    let vault = Vault::open(&passphrase, &storage, &KdfParams::production())?;
+    let vault = Vault::open(&passphrase, &storage, &KdfParams::legacy_production())?;
 
     // Try to create a session for next time (respecting config)
     if !no_session {
@@ -515,7 +528,7 @@ pub fn open_vault_mut_with_session(
     }
 
     let passphrase = prompt_passphrase("Passphrase: ")?;
-    let vault = Vault::open(&passphrase, &storage, &KdfParams::production())?;
+    let vault = Vault::open(&passphrase, &storage, &KdfParams::legacy_production())?;
 
     // Try to create a session (respecting config)
     if !no_session {
@@ -563,4 +576,32 @@ fn hex_decode_32(hex: &str) -> Option<[u8; 32]> {
         bytes[i] = u8::from_str_radix(s, 16).ok()?;
     }
     Some(bytes)
+}
+
+#[cfg(test)]
+mod session_ipc_tests {
+    use super::*;
+
+    #[test]
+    fn create_request_surfaces_failed_socket_write() {
+        let (mut writer, _reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        writer.shutdown(std::net::Shutdown::Write).unwrap();
+        let req = CreateSessionRequest {
+            algorithm: SessionAlgorithm::XChaCha20Poly1305HkdfSha256.to_byte(),
+            encrypted_kek: SecretBuf::from_bytes(&[0xD1; 32]),
+            kek_nonce: vec![0; 24],
+            encrypted_mackey: SecretBuf::from_bytes(&[0xE2; 32]),
+            mackey_nonce: vec![0; 24],
+            ephemeral_pubkey: vec![0; 32],
+            duration: "1h".to_owned(),
+            vault_id: vec![0; 16],
+            idle_timeout_secs: 900,
+        };
+
+        let error = write_create_request(&mut writer, req).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+    }
 }

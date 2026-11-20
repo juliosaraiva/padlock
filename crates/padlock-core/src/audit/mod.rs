@@ -1,7 +1,11 @@
-//! Tamper-evident audit logging for vault operations.
+//! Audit event storage for vault operations.
 //!
-//! Records all vault access events, credential operations, and
-//! signing requests. Audit events intentionally exclude any secret data.
+//! The JSON Lines backend stores unsigned records and skips malformed lines.
+//! The CLI currently reads these records but has no vault-operation writer.
+//! A verifiable audit control needs authenticated sequence numbers and records,
+//! a separately trusted checkpoint to detect truncation or rollback, and a
+//! cross-process append lock. Wire CLI successes and failures into that writer
+//! and surface write errors before claiming audit coverage.
 //!
 //! The audit log implementation uses the `AuditLogger` trait from
 //! `crate::traits::audit` for pluggable backends.

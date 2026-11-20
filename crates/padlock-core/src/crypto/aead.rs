@@ -161,7 +161,7 @@ pub fn unwrap_dek(
     wrapped_dek: &[u8],
     nonce: &[u8; NONCE_SIZE],
 ) -> Result<SecretBuf> {
-    let plaintext = aead_decrypt(kek, nonce, &[], wrapped_dek)?;
+    let plaintext = zeroize::Zeroizing::new(aead_decrypt(kek, nonce, &[], wrapped_dek)?);
     Ok(SecretBuf::from_bytes(&plaintext))
 }
 

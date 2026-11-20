@@ -83,7 +83,7 @@ fn run_setup(cmd: GitSetupCmd, vault_path: &str, json: bool) -> anyhow::Result<(
     let path = resolve_vault_path(vault_path);
     let storage = FilesystemBackend::new(path.clone());
     let passphrase = prompt_passphrase("Passphrase: ")?;
-    let vault = Vault::open(&passphrase, &storage, &KdfParams::production())?;
+    let vault = Vault::open(&passphrase, &storage, &KdfParams::legacy_production())?;
 
     // Find SSH keys in the vault
     let entries = list_entries(&vault)?;
@@ -233,7 +233,7 @@ fn run_allowed_signers(
     let path = resolve_vault_path(vault_path);
     let storage = FilesystemBackend::new(path.clone());
     let passphrase = prompt_passphrase("Passphrase: ")?;
-    let vault = Vault::open(&passphrase, &storage, &KdfParams::production())?;
+    let vault = Vault::open(&passphrase, &storage, &KdfParams::legacy_production())?;
 
     // Find SSH keys with git/ssh tags
     let entries = list_entries(&vault)?;

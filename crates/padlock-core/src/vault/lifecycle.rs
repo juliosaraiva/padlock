@@ -73,6 +73,16 @@ impl KdfParams {
         }
     }
 
+    /// KDF parameters for alpha vaults with no stored costs (1 GiB, t=2, p=4).
+    #[must_use]
+    pub const fn legacy_production() -> Self {
+        Self {
+            memory_kib: 1_048_576,
+            time_cost: 2,
+            parallelism: 4,
+        }
+    }
+
     /// Test KDF parameters (64 KiB, t=1, p=1).
     #[must_use]
     pub fn testing() -> Self {
@@ -167,13 +177,8 @@ impl Vault {
 
         let header = parse_header(&data)?;
 
-        // Use KDF params from the header if present (non-zero), otherwise
-        // fall back to the caller-provided params (for legacy vaults with
-        // zeros at offsets 76-87).
-        let (mem, time, par) = if header.argon2_memory_kib > 0
-            && header.argon2_time_cost > 0
-            && header.argon2_parallelism > 0
-        {
+        // The parser rejects partial tuples. All-zero headers use the legacy profile.
+        let (mem, time, par) = if header.argon2_memory_kib > 0 {
             (
                 header.argon2_memory_kib,
                 header.argon2_time_cost,
@@ -196,34 +201,7 @@ impl Vault {
         verify_hmac(&mackey, authenticated_data, stored_hmac)
             .map_err(|_| Error::Vault(VaultError::WrongPassphrase))?;
 
-        // Parse index
-        let index_start = HEADER_SIZE;
-        let index_end = index_start + header.vault_index_length as usize;
-        if index_end > hmac_start {
-            return Err(Error::Vault(VaultError::CorruptedData));
-        }
-
-        let index = if header.vault_index_length > 0 {
-            deserialize_index(&data[index_start..index_end])?
-        } else {
-            VaultIndex::new()
-        };
-
-        // Extract entries blob
-        let entries_end = index_end + header.entries_blob_length as usize;
-        if entries_end > hmac_start {
-            return Err(Error::Vault(VaultError::CorruptedData));
-        }
-        let entries_blob = data[index_end..entries_end].to_vec();
-
-        Ok(Self {
-            state: VaultState::Unlocked,
-            header,
-            index,
-            kek: Some(kek),
-            mackey: Some(mackey),
-            entries_blob,
-        })
+        Self::from_authenticated_data(header, authenticated_data, kek, mackey)
     }
 
     /// Lock the vault, clearing all keys from memory.
@@ -314,34 +292,7 @@ impl Vault {
         verify_hmac(&mackey, authenticated_data, stored_hmac)
             .map_err(|_| Error::Vault(VaultError::WrongPassphrase))?;
 
-        // Parse index
-        let index_start = HEADER_SIZE;
-        let index_end = index_start + header.vault_index_length as usize;
-        if index_end > hmac_start {
-            return Err(Error::Vault(VaultError::CorruptedData));
-        }
-
-        let index = if header.vault_index_length > 0 {
-            deserialize_index(&data[index_start..index_end])?
-        } else {
-            VaultIndex::new()
-        };
-
-        // Extract entries blob
-        let entries_end = index_end + header.entries_blob_length as usize;
-        if entries_end > hmac_start {
-            return Err(Error::Vault(VaultError::CorruptedData));
-        }
-        let entries_blob = data[index_end..entries_end].to_vec();
-
-        Ok(Self {
-            state: VaultState::Unlocked,
-            header,
-            index,
-            kek: Some(kek),
-            mackey: Some(mackey),
-            entries_blob,
-        })
+        Self::from_authenticated_data(header, authenticated_data, kek, mackey)
     }
 
     /// Get the entries blob.
@@ -517,15 +468,7 @@ impl Vault {
             return Err(Error::Vault(VaultError::Locked));
         }
 
-        // Compact dead entries first to avoid re-encrypting stale data
-        self.compact_entries_blob()?;
-
-        // Generate new salt and store new KDF params in header
         let new_salt = generate_argon2_salt();
-        self.header.argon2_salt = new_salt;
-        self.header.argon2_memory_kib = params.memory_kib;
-        self.header.argon2_time_cost = params.time_cost;
-        self.header.argon2_parallelism = params.parallelism;
 
         // Derive new keys
         let pdk = derive_pdk_with_params(
@@ -537,6 +480,13 @@ impl Vault {
         )?;
         let new_kek = derive_kek(&pdk)?;
         let new_mackey = derive_mackey(&pdk)?;
+
+        // Validate and derive before mutating vault state.
+        self.compact_entries_blob()?;
+        self.header.argon2_salt = new_salt;
+        self.header.argon2_memory_kib = params.memory_kib;
+        self.header.argon2_time_cost = params.time_cost;
+        self.header.argon2_parallelism = params.parallelism;
 
         // Re-encrypt all entries with the new KEK
         let old_kek = self.kek.as_ref().ok_or(Error::Vault(VaultError::Locked))?;
@@ -706,26 +656,32 @@ impl Vault {
         verify_hmac(&mackey, authenticated_data, stored_hmac)
             .map_err(|_| Error::Vault(VaultError::WrongPassphrase))?;
 
-        // Parse index
-        let index_start = HEADER_SIZE;
-        let index_end = index_start + header.vault_index_length as usize;
-        if index_end > hmac_start {
-            return Err(Error::Vault(VaultError::CorruptedData));
+        Self::from_authenticated_data(header, authenticated_data, kek, mackey)
+    }
+
+    fn from_authenticated_data(
+        header: VaultHeader,
+        data: &[u8],
+        kek: SecretBuf,
+        mackey: SecretBuf,
+    ) -> crate::error::Result<Self> {
+        let corrupted = || Error::Vault(VaultError::CorruptedData);
+        let index_end = HEADER_SIZE
+            .checked_add(header.vault_index_length as usize)
+            .ok_or_else(corrupted)?;
+        let entries_end = index_end
+            .checked_add(header.entries_blob_length as usize)
+            .ok_or_else(corrupted)?;
+        if entries_end != data.len() {
+            return Err(corrupted());
         }
 
         let index = if header.vault_index_length > 0 {
-            deserialize_index(&data[index_start..index_end])?
+            deserialize_index(&data[HEADER_SIZE..index_end])?
         } else {
             VaultIndex::new()
         };
-
-        // Extract entries blob
-        let entries_end = index_end + header.entries_blob_length as usize;
-        if entries_end > hmac_start {
-            return Err(Error::Vault(VaultError::CorruptedData));
-        }
         let entries_blob = data[index_end..entries_end].to_vec();
-
         Ok(Self {
             state: VaultState::Unlocked,
             header,

@@ -20,7 +20,7 @@ const SSH_AGENT_FAILURE: u8 = 5;
 
 /// Parsed SSH agent request message.
 #[derive(Debug, Clone)]
-pub enum AgentMessage {
+pub enum AgentMessage<'a> {
     /// Request list of available identities (keys).
     RequestIdentities,
     /// Request a signature using a specific key.
@@ -53,10 +53,30 @@ pub enum AgentMessage {
         /// Extension name.
         name: String,
         /// Extension payload (after the name).
-        payload: Vec<u8>,
+        payload: ExtensionPayload<'a>,
     },
     /// Unknown or unsupported message type.
     Unknown(u8),
+}
+
+/// Borrowed extension bytes. Debug output excludes the payload.
+#[derive(Clone, Copy)]
+pub struct ExtensionPayload<'a>(&'a [u8]);
+
+impl<'a> ExtensionPayload<'a> {
+    /// View the extension payload without copying it.
+    #[must_use]
+    pub fn as_bytes(self) -> &'a [u8] {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for ExtensionPayload<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExtensionPayload")
+            .finish_non_exhaustive()
+    }
 }
 
 /// SSH agent response to send back to the client.
@@ -109,7 +129,7 @@ fn read_string(data: &[u8]) -> Option<(Vec<u8>, usize)> {
 /// # Errors
 ///
 /// Returns `AgentError::ProtocolError` if the message is malformed.
-pub fn parse_message(data: &[u8]) -> crate::error::Result<AgentMessage> {
+pub fn parse_message(data: &[u8]) -> crate::error::Result<AgentMessage<'_>> {
     if data.is_empty() {
         return Err(Error::Agent(AgentError::ProtocolError(
             "empty message".to_string(),
@@ -190,7 +210,7 @@ pub fn parse_message(data: &[u8]) -> crate::error::Result<AgentMessage> {
                     "invalid extension name encoding".to_string(),
                 ))
             })?;
-            let extension_payload = payload[consumed..].to_vec();
+            let extension_payload = ExtensionPayload(&payload[consumed..]);
             Ok(AgentMessage::Extension {
                 name,
                 payload: extension_payload,

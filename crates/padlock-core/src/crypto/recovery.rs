@@ -21,7 +21,7 @@
 use hkdf::Hkdf;
 use rand::RngCore;
 use sha2::Sha256;
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 use super::aead::{aead_decrypt, aead_encrypt, generate_nonce};
 use super::secret_buf::SecretBuf;
@@ -61,15 +61,14 @@ pub fn generate_recovery_key() -> SecretBuf {
 #[must_use]
 pub fn encode_recovery_key(key: &SecretBuf) -> String {
     use std::fmt::Write;
-    let hex = key.iter().fold(String::with_capacity(64), |mut acc, b| {
-        let _ = write!(acc, "{b:02X}");
-        acc
-    });
-    hex.as_bytes()
-        .chunks(8)
-        .map(|chunk| std::str::from_utf8(chunk).unwrap_or(""))
-        .collect::<Vec<_>>()
-        .join("-")
+    let mut encoded = String::with_capacity(key.len() * 3);
+    for (index, byte) in key.iter().enumerate() {
+        if index != 0 && index % 4 == 0 {
+            encoded.push('-');
+        }
+        let _ = write!(encoded, "{byte:02X}");
+    }
+    encoded
 }
 
 /// Decode a recovery key from hex string.
@@ -82,7 +81,13 @@ pub fn encode_recovery_key(key: &SecretBuf) -> String {
 /// Returns `CryptoError::InvalidEncoding` if the string contains non-UTF-8 or
 /// non-hexadecimal characters.
 pub fn decode_recovery_key(encoded: &str) -> Result<SecretBuf> {
-    let hex: String = encoded.chars().filter(|c| *c != '-').collect();
+    const MAX_ENCODED_LENGTH: usize = 128;
+    if encoded.len() > MAX_ENCODED_LENGTH {
+        return Err(Error::Crypto(CryptoError::InvalidEncoding {
+            reason: "recovery key input exceeds 128 bytes".to_owned(),
+        }));
+    }
+    let hex = Zeroizing::new(encoded.chars().filter(|c| *c != '-').collect::<String>());
     if hex.len() != RECOVERY_KEY_SIZE * 2 {
         return Err(Error::Crypto(CryptoError::InvalidKeyLength {
             expected: RECOVERY_KEY_SIZE,
@@ -90,23 +95,21 @@ pub fn decode_recovery_key(encoded: &str) -> Result<SecretBuf> {
         }));
     }
 
-    let mut bytes = vec![0u8; RECOVERY_KEY_SIZE];
+    let mut bytes = SecretBuf::new(RECOVERY_KEY_SIZE);
     for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
         let s = std::str::from_utf8(chunk).map_err(|_| {
             Error::Crypto(CryptoError::InvalidEncoding {
                 reason: "recovery key contains non-UTF-8 characters".to_string(),
             })
         })?;
-        bytes[i] = u8::from_str_radix(s, 16).map_err(|_| {
+        bytes.as_mut_slice()[i] = u8::from_str_radix(s, 16).map_err(|_| {
             Error::Crypto(CryptoError::InvalidEncoding {
                 reason: "recovery key contains non-hexadecimal characters".to_string(),
             })
         })?;
     }
 
-    let secret = SecretBuf::from_bytes(&bytes);
-    bytes.zeroize();
-    Ok(secret)
+    Ok(bytes)
 }
 
 /// Derive a recovery wrapping key from the recovery key and salt.
@@ -144,15 +147,12 @@ pub fn wrap_keys_for_recovery(
     kek: &SecretBuf,
     mackey: &SecretBuf,
 ) -> Result<([u8; RECOVERY_NONCE_SIZE], Vec<u8>)> {
-    let mut plaintext = Vec::with_capacity(64);
+    let mut plaintext = Zeroizing::new(Vec::with_capacity(kek.len() + mackey.len()));
     plaintext.extend_from_slice(kek);
     plaintext.extend_from_slice(mackey);
 
     let nonce = generate_nonce();
     let blob = aead_encrypt(wrapping_key, &nonce, &[], &plaintext)?;
-
-    // Zeroize the plaintext buffer
-    plaintext.fill(0);
 
     Ok((nonce, blob))
 }
@@ -172,10 +172,9 @@ pub fn unwrap_keys_from_recovery(
     nonce: &[u8; RECOVERY_NONCE_SIZE],
     blob: &[u8],
 ) -> Result<(SecretBuf, SecretBuf)> {
-    let mut plaintext = aead_decrypt(wrapping_key, nonce, &[], blob)?;
+    let plaintext = Zeroizing::new(aead_decrypt(wrapping_key, nonce, &[], blob)?);
 
     if plaintext.len() != 64 {
-        plaintext.zeroize();
         return Err(Error::Crypto(CryptoError::InvalidKeyLength {
             expected: 64,
             actual: plaintext.len(),
@@ -185,7 +184,6 @@ pub fn unwrap_keys_from_recovery(
     let kek = SecretBuf::from_bytes(&plaintext[..32]);
     let mackey = SecretBuf::from_bytes(&plaintext[32..]);
 
-    plaintext.zeroize();
     Ok((kek, mackey))
 }
 
@@ -247,6 +245,26 @@ mod tests {
             Err(crate::error::Error::Crypto(
                 crate::error::CryptoError::InvalidEncoding { .. }
             ))
+        ));
+    }
+
+    #[test]
+    fn recovery_rejects_invalid_suffix_and_oversized_input() {
+        for encoded in [format!("{}ZZ", "AB".repeat(31)), "-".repeat(129)] {
+            assert!(matches!(
+                decode_recovery_key(&encoded),
+                Err(Error::Crypto(CryptoError::InvalidEncoding { .. }))
+            ));
+        }
+    }
+
+    #[test]
+    fn recovery_wrap_with_invalid_wrapping_key_returns_error() {
+        let key = generate_recovery_key();
+        let invalid = SecretBuf::new(31);
+        assert!(matches!(
+            wrap_keys_for_recovery(&invalid, &key, &key),
+            Err(Error::Crypto(CryptoError::InvalidKeyLength { .. }))
         ));
     }
 

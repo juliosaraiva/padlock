@@ -12,7 +12,7 @@ use rand::RngCore;
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
-use crate::crypto::aead::{aead_decrypt, aead_encrypt, generate_nonce, KEY_SIZE, NONCE_SIZE};
+use crate::crypto::aead::{aead_encrypt, generate_nonce, unwrap_dek, KEY_SIZE, NONCE_SIZE};
 use crate::crypto::secret_buf::SecretBuf;
 use crate::error::{Error, Result, SessionError};
 use crate::session::types::{
@@ -175,28 +175,16 @@ impl SessionManager for SessionStore {
             return Err(Error::Session(SessionError::Expired));
         }
 
-        // Unwrap KEK
-        let kek_plaintext =
-            aead_decrypt(&session.sek, &session.kek_nonce, &[], &session.wrapped_kek)
-                .map_err(|_| Error::Session(SessionError::KeyOperationFailed))?;
-
-        // Unwrap MACKEY
-        let mackey_plaintext = aead_decrypt(
-            &session.sek,
-            &session.mackey_nonce,
-            &[],
-            &session.wrapped_mackey,
-        )
-        .map_err(|_| Error::Session(SessionError::KeyOperationFailed))?;
+        let kek = unwrap_dek(&session.sek, &session.wrapped_kek, &session.kek_nonce)
+            .map_err(|_| Error::Session(SessionError::KeyOperationFailed))?;
+        let mackey = unwrap_dek(&session.sek, &session.wrapped_mackey, &session.mackey_nonce)
+            .map_err(|_| Error::Session(SessionError::KeyOperationFailed))?;
 
         // Reset idle timer on successful use
         session.last_accessed = now;
         session.use_count += 1;
 
-        Ok((
-            SecretBuf::from_bytes(&kek_plaintext),
-            SecretBuf::from_bytes(&mackey_plaintext),
-        ))
+        Ok((kek, mackey))
     }
 
     fn destroy_session(&self, token: &[u8; 32]) -> Result<()> {

@@ -95,8 +95,7 @@ fn is_agent_running(vault_path: &str) -> bool {
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
+                .is_ok_and(|status| status.success());
             if !process_alive {
                 return false;
             }
@@ -295,7 +294,7 @@ async fn accept_loop(
                 }
 
                 // Read message payload
-                let mut msg_buf = vec![0u8; msg_len];
+                let mut msg_buf = zeroize::Zeroizing::new(vec![0u8; msg_len]);
                 if stream.read_exact(&mut msg_buf).await.is_err() {
                     break;
                 }
@@ -309,6 +308,7 @@ async fn accept_loop(
                     Err(_) => AgentResponse::Failure,
                 };
 
+                drop(msg_buf);
                 let response_bytes = serialize_response(&response);
                 if stream.write_all(&response_bytes).await.is_err() {
                     break;

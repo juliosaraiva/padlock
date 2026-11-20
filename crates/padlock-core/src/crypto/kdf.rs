@@ -50,6 +50,37 @@ const TEST_ARGON2_TIME_COST: u32 = 1;
 /// Argon2id parallelism for testing.
 const TEST_ARGON2_PARALLELISM: u32 = 1;
 
+// Preserve the alpha and current production profiles while bounding unauthenticated work.
+const MAX_MEMORY_KIB: u32 = 1_048_576;
+const MAX_TIME_COST: u32 = 4;
+const MAX_PARALLELISM: u32 = 4;
+const MAX_MEMORY_PASSES: u32 = 2 * MAX_MEMORY_KIB;
+
+pub(crate) fn validated_params(
+    memory_kib: u32,
+    time_cost: u32,
+    parallelism: u32,
+) -> Result<Params> {
+    if memory_kib == 0 || time_cost == 0 || parallelism == 0 {
+        return Err(Error::Crypto(CryptoError::Argon2Error(
+            "parameters must all be nonzero".to_owned(),
+        )));
+    }
+
+    if memory_kib > MAX_MEMORY_KIB
+        || time_cost > MAX_TIME_COST
+        || parallelism > MAX_PARALLELISM
+        || memory_kib.saturating_mul(time_cost) > MAX_MEMORY_PASSES
+    {
+        return Err(Error::Crypto(CryptoError::Argon2Error(
+            "parameters exceed Padlock resource limits".to_owned(),
+        )));
+    }
+
+    Params::new(memory_kib, time_cost, parallelism, Some(PDK_LENGTH))
+        .map_err(|e| Error::Crypto(CryptoError::Argon2Error(e.to_string())))
+}
+
 /// Derive the Primary Derivation Key (PDK) from a passphrase and salt.
 ///
 /// Uses Argon2id with memory-hard parameters to produce a 256-bit key.
@@ -98,8 +129,7 @@ pub fn derive_pdk_with_params(
         }));
     }
 
-    let params = Params::new(memory_kib, time_cost, parallelism, Some(PDK_LENGTH))
-        .map_err(|e| Error::Crypto(CryptoError::Argon2Error(e.to_string())))?;
+    let params = validated_params(memory_kib, time_cost, parallelism)?;
 
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 

@@ -109,7 +109,7 @@ impl AgentHandler {
 
     /// Handle an incoming agent message and produce a response.
     #[must_use]
-    pub fn handle_message(&self, message: &AgentMessage) -> AgentResponse {
+    pub fn handle_message(&self, message: &AgentMessage<'_>) -> AgentResponse {
         match message {
             AgentMessage::RequestIdentities => {
                 let keys = self
@@ -134,7 +134,7 @@ impl AgentHandler {
             }
             AgentMessage::Extension { name, payload } => {
                 if name == SESSION_EXTENSION_NAME {
-                    self.handle_session_extension(payload)
+                    self.handle_session_extension(payload.as_bytes())
                 } else {
                     AgentResponse::Failure
                 }
@@ -154,7 +154,7 @@ impl AgentHandler {
         };
 
         match request {
-            SessionRequest::Create(req) => Self::handle_session_create(store, req),
+            SessionRequest::Create(req) => Self::handle_session_create(store, &req),
             SessionRequest::Resume(req) => Self::handle_session_resume(store, req),
             SessionRequest::Destroy(req) => Self::handle_session_destroy(store, req),
             SessionRequest::Status(req) => Self::handle_session_status(store, req),
@@ -168,7 +168,7 @@ impl AgentHandler {
     /// Unix socket. The socket is secured by filesystem permissions (0o600),
     /// which restricts access to the same user. Transit encryption is only
     /// used for the `ResumeSession` response path (daemon→CLI).
-    fn handle_session_create(store: &SessionStore, req: CreateSessionRequest) -> AgentResponse {
+    fn handle_session_create(store: &SessionStore, req: &CreateSessionRequest) -> AgentResponse {
         // Validate algorithm
         let Some(algorithm) = SessionAlgorithm::from_byte(req.algorithm) else {
             return AgentResponse::Failure;
@@ -180,14 +180,10 @@ impl AgentHandler {
         };
 
         // Validate vault_id
-        let vault_id: [u8; 16] = match req.vault_id.try_into() {
+        let vault_id: [u8; 16] = match req.vault_id.as_slice().try_into() {
             Ok(v) => v,
             Err(_) => return AgentResponse::Failure,
         };
-
-        // Accept KEK and MACKEY directly (transport secured by socket permissions)
-        let kek = crate::crypto::secret_buf::SecretBuf::from_bytes(&req.encrypted_kek);
-        let mackey = crate::crypto::secret_buf::SecretBuf::from_bytes(&req.encrypted_mackey);
 
         // Parse idle timeout from request, falling back to default
         let idle_timeout = if req.idle_timeout_secs > 0 {
@@ -197,9 +193,14 @@ impl AgentHandler {
         };
 
         // Create session
-        let Ok(token) =
-            store.create_session(&kek, &mackey, &vault_id, duration, idle_timeout, algorithm)
-        else {
+        let Ok(token) = store.create_session(
+            &req.encrypted_kek,
+            &req.encrypted_mackey,
+            &vault_id,
+            duration,
+            idle_timeout,
+            algorithm,
+        ) else {
             return AgentResponse::Failure;
         };
 
@@ -438,7 +439,7 @@ mod tests {
         let handler = AgentHandler::new();
         let response = handler.handle_message(&AgentMessage::RequestIdentities);
         match response {
-            AgentResponse::IdentitiesAnswer { keys } => assert!(keys.is_empty()),
+            AgentResponse::IdentitiesAnswer { keys } => assert_eq!(keys, []),
             _ => panic!("expected IdentitiesAnswer"),
         }
     }
@@ -472,7 +473,7 @@ mod tests {
 
         match response {
             AgentResponse::SignResponse { signature } => {
-                assert!(!signature.is_empty());
+                assert_ne!(signature, [] as [u8; 0]);
             }
             _ => panic!("expected SignResponse"),
         }
