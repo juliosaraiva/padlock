@@ -136,6 +136,8 @@ fn test_vault_open_preserves_uuid() {
 
 // --- Data persistence across reopen ---
 
+// Preserve existing integer conversion semantics. Bounds changes need separate review.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 #[test]
 fn test_vault_reopen_preserves_entry_data() {
     let dir = TempDir::new().unwrap();
@@ -177,6 +179,8 @@ fn test_vault_reopen_preserves_entry_data() {
     assert_eq!(decrypted, plaintext);
 }
 
+// Preserve existing integer conversion semantics. Bounds changes need separate review.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 #[test]
 fn test_vault_reopen_preserves_multiple_entries() {
     let dir = TempDir::new().unwrap();
@@ -232,6 +236,8 @@ fn test_vault_reopen_preserves_multiple_entries() {
 
 // --- Change passphrase ---
 
+// Preserve existing integer conversion semantics. Bounds changes need separate review.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 #[test]
 fn test_vault_change_passphrase_new_passphrase_works() {
     let dir = TempDir::new().unwrap();

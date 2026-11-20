@@ -19,6 +19,11 @@ pub struct SearchCmd {
 }
 
 /// Execute the search command.
+///
+/// # Errors
+/// Returns an error if the vault or its entries cannot be searched.
+// Keep ownership at the command dispatch boundary.
+#[allow(clippy::needless_pass_by_value)]
 pub fn run(cmd: SearchCmd, vault_path: &str, fmt: &OutputFormatter) -> anyhow::Result<()> {
     let vault = open_vault_with_session(vault_path)?;
 

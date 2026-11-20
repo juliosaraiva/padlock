@@ -11,8 +11,10 @@ pub struct LockCmd {}
 /// Execute the lock command.
 ///
 /// Destroys all active sessions in the daemon, deletes the session
-/// token file, and signals the user to unset the PADLOCK_SESSION
+/// token file, and signals the user to unset the `PADLOCK_SESSION`
 /// environment variable if set.
+// Keep the shared command result type for an infallible command.
+#[allow(clippy::missing_errors_doc)]
 pub fn run(_cmd: LockCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
     let path = super::resolve_vault_path(vault_path);
 

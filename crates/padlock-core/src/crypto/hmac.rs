@@ -28,6 +28,9 @@ type HmacSha256 = Hmac<Sha256>;
 /// # Returns
 ///
 /// A 32-byte HMAC tag.
+///
+/// # Panics
+/// Panics if the HMAC implementation rejects the key length. HMAC-SHA-256 accepts all lengths.
 #[must_use]
 pub fn compute_hmac(key: &[u8], data: &[u8]) -> [u8; HMAC_SIZE] {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-SHA-256 accepts any key length");
@@ -53,6 +56,9 @@ pub fn compute_hmac(key: &[u8], data: &[u8]) -> [u8; HMAC_SIZE] {
 /// # Errors
 ///
 /// Returns `CryptoError::AuthenticationFailed` if the HMAC does not match.
+///
+/// # Panics
+/// Panics if the HMAC implementation rejects the key length. HMAC-SHA-256 accepts all lengths.
 pub fn verify_hmac(key: &[u8], data: &[u8], expected_tag: &[u8]) -> Result<()> {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-SHA-256 accepts any key length");
     mac.update(data);

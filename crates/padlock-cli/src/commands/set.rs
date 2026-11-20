@@ -34,6 +34,9 @@ pub struct SetCmd {
 }
 
 /// Execute the set command.
+///
+/// # Errors
+/// Returns an error if the entry cannot be created or updated and saved.
 pub fn run(cmd: SetCmd, vault_path: &str) -> anyhow::Result<()> {
     let (mut vault, storage) = open_vault_mut_with_session(vault_path)?;
 

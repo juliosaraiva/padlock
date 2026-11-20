@@ -105,6 +105,7 @@ pub enum Commands {
 }
 
 /// Resolve the vault path, expanding ~ to the home directory.
+#[must_use]
 pub fn resolve_vault_path(path: &str) -> PathBuf {
     if path.starts_with('~') {
         if let Some(home) = dirs::home_dir() {
@@ -115,6 +116,9 @@ pub fn resolve_vault_path(path: &str) -> PathBuf {
 }
 
 /// Prompt for the vault passphrase.
+///
+/// # Errors
+/// Returns an error if the vault passphrase cannot be read.
 pub fn prompt_passphrase(prompt: &str) -> anyhow::Result<String> {
     rpassword::prompt_password(prompt)
         .map_err(|e| anyhow::anyhow!("failed to read passphrase: {e}"))
@@ -124,8 +128,7 @@ pub fn prompt_passphrase(prompt: &str) -> anyhow::Result<String> {
 fn padlock_dir(vault_path: &str) -> PathBuf {
     let path = resolve_vault_path(vault_path);
     path.parent()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("~/.padlock"))
+        .map_or_else(|| PathBuf::from("~/.padlock"), PathBuf::from)
 }
 
 /// Get the session token file path.
@@ -140,7 +143,7 @@ fn agent_socket_path_for_session(vault_path: &str) -> PathBuf {
 
 /// Read a session token from the environment or token file.
 ///
-/// Lookup order: PADLOCK_SESSION env var -> ~/.padlock/session.token file
+/// Lookup order: `PADLOCK_SESSION` env var -> ~/.padlock/session.token file
 fn read_session_token(vault_path: &str) -> Option<[u8; SESSION_TOKEN_SIZE]> {
     // Check environment variable first
     if let Ok(hex_str) = std::env::var("PADLOCK_SESSION") {
@@ -258,13 +261,13 @@ fn try_resume_session(vault_path: &str) -> Option<(SecretBuf, SecretBuf)> {
     ))
 }
 
-/// Send CreateSession to the daemon to cache KEK and MACKEY.
+/// Send `CreateSession` to the daemon to cache KEK and MACKEY.
 ///
-/// For CreateSession, KEK and MACKEY bytes are sent directly over the
+/// For `CreateSession`, KEK and MACKEY bytes are sent directly over the
 /// Unix socket. The socket is secured by filesystem permissions (0o600),
 /// restricting access to the same user. The daemon immediately wraps
 /// the keys with a random SEK upon receipt. Transit encryption (ephemeral
-/// X25519) is used only for the ResumeSession response path (daemon->CLI).
+/// X25519) is used only for the `ResumeSession` response path (daemon->CLI).
 ///
 /// Returns the session token on success.
 fn create_daemon_session(
@@ -325,7 +328,7 @@ fn create_daemon_session(
     Some(create_resp.token)
 }
 
-/// Send DestroySession or DestroyAll to the daemon.
+/// Send `DestroySession` or `DestroyAll` to the daemon.
 pub fn destroy_daemon_session(vault_path: &str, token: Option<&[u8; SESSION_TOKEN_SIZE]>) {
     let socket = agent_socket_path_for_session(vault_path);
     if !socket.exists() {
@@ -367,18 +370,19 @@ pub fn destroy_daemon_session(vault_path: &str, token: Option<&[u8; SESSION_TOKE
 /// If a session is successfully resumed, returns the vault without prompting.
 /// If no valid session exists, prompts for passphrase and optionally creates
 /// a session for future use.
+///
+/// # Errors
+/// Returns an error if the vault cannot be opened with cached keys or a passphrase.
 pub fn open_vault_with_session(vault_path: &str) -> anyhow::Result<Vault> {
     let path = resolve_vault_path(vault_path);
     let storage = FilesystemBackend::new(path);
 
     // Try to resume from session cache
     if let Some((kek, mackey)) = try_resume_session(vault_path) {
-        match Vault::open_with_keys(kek, mackey, &storage) {
-            Ok(vault) => return Ok(vault),
-            Err(_) => {
-                // Session keys are stale, fall through to passphrase
-            }
+        if let Ok(vault) = Vault::open_with_keys(kek, mackey, &storage) {
+            return Ok(vault);
         }
+        // Session keys are stale, fall through to passphrase
     }
 
     // Fall back to passphrase prompt
@@ -399,18 +403,19 @@ pub fn open_vault_with_session(vault_path: &str) -> anyhow::Result<Vault> {
 }
 
 /// Open a vault mutably, trying session cache first.
+///
+/// # Errors
+/// Returns an error if the vault cannot be opened with cached keys or a passphrase.
 pub fn open_vault_mut_with_session(vault_path: &str) -> anyhow::Result<(Vault, FilesystemBackend)> {
     let path = resolve_vault_path(vault_path);
     let storage = FilesystemBackend::new(path);
 
     // Try to resume from session cache
     if let Some((kek, mackey)) = try_resume_session(vault_path) {
-        match Vault::open_with_keys(kek, mackey, &storage) {
-            Ok(vault) => return Ok((vault, storage)),
-            Err(_) => {
-                // Fall through
-            }
+        if let Ok(vault) = Vault::open_with_keys(kek, mackey, &storage) {
+            return Ok((vault, storage));
         }
+        // Fall through
     }
 
     let passphrase = prompt_passphrase("Passphrase: ")?;
@@ -431,7 +436,14 @@ pub fn open_vault_mut_with_session(vault_path: &str) -> anyhow::Result<(Vault, F
 
 /// Hex-encode bytes to lowercase hex string.
 fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
+    for byte in bytes {
+        // Writing to a String cannot fail.
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
 }
 
 /// Decode a 32-byte hex string to a fixed-size array.

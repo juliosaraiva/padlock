@@ -116,18 +116,11 @@ impl AgentHandler {
                 data,
                 flags: _,
             } => self.handle_sign_request(key_blob, data),
-            AgentMessage::AddIdentity { .. } => {
-                // External key addition is not supported -- keys come from the vault.
-                AgentResponse::Failure
-            }
-            AgentMessage::RemoveIdentity { .. } => {
-                // Removal via protocol not supported; use CLI commands.
-                AgentResponse::Failure
-            }
-            AgentMessage::RemoveAllIdentities => {
-                // Removal via protocol not supported; use CLI commands.
-                AgentResponse::Failure
-            }
+            // Keys come from the vault and are managed via CLI.
+            AgentMessage::AddIdentity { .. }
+            | AgentMessage::RemoveIdentity { .. }
+            | AgentMessage::RemoveAllIdentities
+            | AgentMessage::Unknown(_) => AgentResponse::Failure,
             AgentMessage::Extension { name, payload } => {
                 if name == SESSION_EXTENSION_NAME {
                     self.handle_session_extension(payload)
@@ -135,7 +128,6 @@ impl AgentHandler {
                     AgentResponse::Failure
                 }
             }
-            AgentMessage::Unknown(_) => AgentResponse::Failure,
         }
     }
 
@@ -145,47 +137,39 @@ impl AgentHandler {
             return AgentResponse::Failure;
         };
 
-        let request = match protocol::parse_session_request(payload) {
-            Ok(req) => req,
-            Err(_) => return AgentResponse::Failure,
+        let Ok(request) = protocol::parse_session_request(payload) else {
+            return AgentResponse::Failure;
         };
 
         match request {
-            SessionRequest::Create(req) => self.handle_session_create(store, req),
-            SessionRequest::Resume(req) => self.handle_session_resume(store, req),
-            SessionRequest::Destroy(req) => self.handle_session_destroy(store, req),
-            SessionRequest::Status(req) => self.handle_session_status(store, req),
-            SessionRequest::DestroyAll => self.handle_session_destroy_all(store),
+            SessionRequest::Create(req) => Self::handle_session_create(store, req),
+            SessionRequest::Resume(req) => Self::handle_session_resume(store, req),
+            SessionRequest::Destroy(req) => Self::handle_session_destroy(store, req),
+            SessionRequest::Status(req) => Self::handle_session_status(store, req),
+            SessionRequest::DestroyAll => Self::handle_session_destroy_all(store),
         }
     }
 
-    /// Handle a CreateSession request.
+    /// Handle a `CreateSession` request.
     ///
-    /// For CreateSession, the KEK and MACKEY arrive as raw bytes over the
+    /// For `CreateSession`, the KEK and MACKEY arrive as raw bytes over the
     /// Unix socket. The socket is secured by filesystem permissions (0o600),
     /// which restricts access to the same user. Transit encryption is only
-    /// used for the ResumeSession response path (daemon→CLI).
-    fn handle_session_create(
-        &self,
-        store: &SessionStore,
-        req: CreateSessionRequest,
-    ) -> AgentResponse {
+    /// used for the `ResumeSession` response path (daemon→CLI).
+    fn handle_session_create(store: &SessionStore, req: CreateSessionRequest) -> AgentResponse {
         // Validate algorithm
-        let algorithm = match SessionAlgorithm::from_byte(req.algorithm) {
-            Some(a) => a,
-            None => return AgentResponse::Failure,
+        let Some(algorithm) = SessionAlgorithm::from_byte(req.algorithm) else {
+            return AgentResponse::Failure;
         };
 
         // Validate duration
-        let duration = match SessionDuration::from_str_label(&req.duration) {
-            Some(d) => d,
-            None => return AgentResponse::Failure,
+        let Some(duration) = SessionDuration::from_str_label(&req.duration) else {
+            return AgentResponse::Failure;
         };
 
         // Validate vault_id
-        let vault_id: [u8; 16] = match req.vault_id.try_into() {
-            Ok(v) => v,
-            Err(_) => return AgentResponse::Failure,
+        let Ok(vault_id) = <[u8; 16]>::try_from(req.vault_id) else {
+            return AgentResponse::Failure;
         };
 
         // Accept KEK and MACKEY directly (transport secured by socket permissions)
@@ -193,9 +177,8 @@ impl AgentHandler {
         let mackey = crate::crypto::secret_buf::SecretBuf::from_bytes(&req.encrypted_mackey);
 
         // Create session
-        let token = match store.create_session(&kek, &mackey, &vault_id, duration, algorithm) {
-            Ok(t) => t,
-            Err(_) => return AgentResponse::Failure,
+        let Ok(token) = store.create_session(&kek, &mackey, &vault_id, duration, algorithm) else {
+            return AgentResponse::Failure;
         };
 
         let resp = CreateSessionResponse {
@@ -209,46 +192,37 @@ impl AgentHandler {
         }
     }
 
-    /// Handle a ResumeSession request.
-    fn handle_session_resume(
-        &self,
-        store: &SessionStore,
-        req: ResumeSessionRequest,
-    ) -> AgentResponse {
+    /// Handle a `ResumeSession` request.
+    fn handle_session_resume(store: &SessionStore, req: ResumeSessionRequest) -> AgentResponse {
         // Validate token
-        let token: [u8; SESSION_TOKEN_SIZE] = match req.token.try_into() {
-            Ok(t) => t,
-            Err(_) => return AgentResponse::Failure,
+        let Ok(token) = <[u8; SESSION_TOKEN_SIZE]>::try_from(req.token) else {
+            return AgentResponse::Failure;
         };
 
         // Validate ephemeral pubkey
-        let initiator_pubkey: [u8; 32] = match req.ephemeral_pubkey.try_into() {
-            Ok(pk) => pk,
-            Err(_) => return AgentResponse::Failure,
+        let Ok(initiator_pubkey) = <[u8; 32]>::try_from(req.ephemeral_pubkey) else {
+            return AgentResponse::Failure;
         };
 
         // Resume session to get KEK + MACKEY
-        let (kek, mackey) = match store.resume_session(&token) {
-            Ok(keys) => keys,
-            Err(_) => return AgentResponse::Failure,
+        let Ok((kek, mackey)) = store.resume_session(&token) else {
+            return AgentResponse::Failure;
         };
 
         // Derive transit key (responder side)
-        let (responder_pubkey, transit_key) = match responder_derive_transit(&initiator_pubkey) {
-            Ok(r) => r,
-            Err(_) => return AgentResponse::Failure,
+        let Ok((responder_pubkey, transit_key)) = responder_derive_transit(&initiator_pubkey)
+        else {
+            return AgentResponse::Failure;
         };
 
         // Encrypt KEK for transit
-        let (kek_nonce, encrypted_kek) = match transit_encrypt(&transit_key, &kek) {
-            Ok(r) => r,
-            Err(_) => return AgentResponse::Failure,
+        let Ok((kek_nonce, encrypted_kek)) = transit_encrypt(&transit_key, &kek) else {
+            return AgentResponse::Failure;
         };
 
         // Encrypt MACKEY for transit
-        let (mackey_nonce, encrypted_mackey) = match transit_encrypt(&transit_key, &mackey) {
-            Ok(r) => r,
-            Err(_) => return AgentResponse::Failure,
+        let Ok((mackey_nonce, encrypted_mackey)) = transit_encrypt(&transit_key, &mackey) else {
+            return AgentResponse::Failure;
         };
 
         let resp = ResumeSessionResponse {
@@ -265,15 +239,10 @@ impl AgentHandler {
         }
     }
 
-    /// Handle a DestroySession request.
-    fn handle_session_destroy(
-        &self,
-        store: &SessionStore,
-        req: DestroySessionRequest,
-    ) -> AgentResponse {
-        let token: [u8; SESSION_TOKEN_SIZE] = match req.token.try_into() {
-            Ok(t) => t,
-            Err(_) => return AgentResponse::Failure,
+    /// Handle a `DestroySession` request.
+    fn handle_session_destroy(store: &SessionStore, req: DestroySessionRequest) -> AgentResponse {
+        let Ok(token) = <[u8; SESSION_TOKEN_SIZE]>::try_from(req.token) else {
+            return AgentResponse::Failure;
         };
 
         match store.destroy_session(&token) {
@@ -285,22 +254,16 @@ impl AgentHandler {
         }
     }
 
-    /// Handle a SessionStatus request.
-    fn handle_session_status(
-        &self,
-        store: &SessionStore,
-        req: StatusSessionRequest,
-    ) -> AgentResponse {
-        let token: [u8; SESSION_TOKEN_SIZE] = match req.token.try_into() {
-            Ok(t) => t,
-            Err(_) => return AgentResponse::Failure,
+    /// Handle a `SessionStatus` request.
+    fn handle_session_status(store: &SessionStore, req: StatusSessionRequest) -> AgentResponse {
+        let Ok(token) = <[u8; SESSION_TOKEN_SIZE]>::try_from(req.token) else {
+            return AgentResponse::Failure;
         };
 
         match store.session_status(&token) {
             Ok(info) => {
-                let info_bytes = match rmp_serde::to_vec(&info) {
-                    Ok(b) => b,
-                    Err(_) => return AgentResponse::Failure,
+                let Ok(info_bytes) = rmp_serde::to_vec(&info) else {
+                    return AgentResponse::Failure;
                 };
                 match protocol::serialize_session_response(&SessionResponse::StatusInfo(info_bytes))
                 {
@@ -312,8 +275,8 @@ impl AgentHandler {
         }
     }
 
-    /// Handle a DestroyAll request.
-    fn handle_session_destroy_all(&self, store: &SessionStore) -> AgentResponse {
+    /// Handle a `DestroyAll` request.
+    fn handle_session_destroy_all(store: &SessionStore) -> AgentResponse {
         match store.destroy_all_sessions() {
             Ok(()) => match protocol::serialize_session_response(&SessionResponse::Success) {
                 Ok(payload) => AgentResponse::ExtensionResponse { payload },
@@ -330,13 +293,15 @@ impl AgentHandler {
         };
 
         match key.key_type.as_str() {
-            "ssh-ed25519" => self.sign_ed25519(key, data),
+            "ssh-ed25519" => Self::sign_ed25519(key, data),
             _ => AgentResponse::Failure,
         }
     }
 
     /// Sign data using an Ed25519 key.
-    fn sign_ed25519(&self, key: &LoadedKey, data: &[u8]) -> AgentResponse {
+    // Preserve existing integer conversion semantics. Bounds changes need separate review.
+    #[allow(clippy::cast_possible_truncation)]
+    fn sign_ed25519(key: &LoadedKey, data: &[u8]) -> AgentResponse {
         use ed25519_dalek::{Signer, SigningKey};
 
         if key.private_key_bytes.len() < 32 {
@@ -344,9 +309,8 @@ impl AgentHandler {
         }
 
         // Ed25519 signing key is the first 32 bytes
-        let key_bytes: [u8; 32] = match key.private_key_bytes[..32].try_into() {
-            Ok(b) => b,
-            Err(_) => return AgentResponse::Failure,
+        let Ok(key_bytes) = <[u8; 32]>::try_from(&key.private_key_bytes[..32]) else {
+            return AgentResponse::Failure;
         };
 
         let signing_key = SigningKey::from_bytes(&key_bytes);
@@ -370,6 +334,8 @@ mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
 
+    // Preserve existing integer conversion semantics. Bounds changes need separate review.
+    #[allow(clippy::cast_possible_truncation)]
     fn make_test_key() -> LoadedKey {
         let signing_key = SigningKey::from_bytes(&[42u8; 32]);
         let verifying_key = signing_key.verifying_key();
@@ -433,7 +399,7 @@ mod tests {
         let handler = AgentHandler::new();
         let response = handler.handle_message(&AgentMessage::RequestIdentities);
         match response {
-            AgentResponse::IdentitiesAnswer { keys } => assert!(keys.is_empty()),
+            AgentResponse::IdentitiesAnswer { keys } => assert_eq!(keys, []),
             _ => panic!("expected IdentitiesAnswer"),
         }
     }
@@ -467,7 +433,7 @@ mod tests {
 
         match response {
             AgentResponse::SignResponse { signature } => {
-                assert!(!signature.is_empty());
+                assert_ne!(signature, [] as [u8; 0]);
             }
             _ => panic!("expected SignResponse"),
         }

@@ -243,7 +243,14 @@ pub struct SessionInfo {
 
 /// Hex-encode a byte slice (lowercase).
 fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
+    for byte in bytes {
+        // Writing to a String cannot fail.
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
 }
 
 #[cfg(test)]

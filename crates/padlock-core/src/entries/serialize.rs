@@ -1,9 +1,9 @@
-//! MessagePack serialization and deserialization for entries.
+//! `MessagePack` serialization and deserialization for entries.
 
 use crate::entries::types::Entry;
 use crate::error::{EntryError, Error};
 
-/// Serialize an entry to MessagePack bytes.
+/// Serialize an entry to `MessagePack` bytes.
 ///
 /// # Errors
 ///
@@ -13,7 +13,7 @@ pub fn serialize_entry(entry: &Entry) -> crate::error::Result<Vec<u8>> {
         .map_err(|e| Error::Entry(EntryError::SerializationFailed(e.to_string())))
 }
 
-/// Deserialize an entry from MessagePack bytes.
+/// Deserialize an entry from `MessagePack` bytes.
 ///
 /// # Errors
 ///

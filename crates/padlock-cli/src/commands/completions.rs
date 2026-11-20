@@ -31,6 +31,10 @@ pub enum ShellType {
 }
 
 /// Run the completions command.
+// Keep the shared command result type for an infallible command.
+#[allow(clippy::missing_errors_doc)]
+// Keep ownership at the command dispatch boundary.
+#[allow(clippy::needless_pass_by_value)]
 pub fn run(cmd: CompletionsCmd) -> anyhow::Result<()> {
     let cli_cmd = Cli::command();
 
@@ -41,7 +45,7 @@ pub fn run(cmd: CompletionsCmd) -> anyhow::Result<()> {
         ShellType::PowerShell => {
             aot::PowerShell.generate(&cli_cmd, &mut std::io::stdout());
         }
-    };
+    }
 
     Ok(())
 }

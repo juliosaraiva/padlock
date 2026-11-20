@@ -12,6 +12,9 @@ use crate::output::OutputFormatter;
 pub struct LsCmd {}
 
 /// Execute the ls command.
+///
+/// # Errors
+/// Returns an error if the vault or its entries cannot be read.
 pub fn run(_cmd: LsCmd, vault_path: &str, fmt: &OutputFormatter) -> anyhow::Result<()> {
     let vault = open_vault_with_session(vault_path)?;
 

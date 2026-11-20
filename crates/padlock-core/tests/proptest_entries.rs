@@ -1,7 +1,7 @@
 //! Property-based tests for entry serialization.
 //!
 //! Verifies that serialize -> deserialize is the identity function
-//! for all EntryData variants with arbitrary field values.
+//! for all `EntryData` variants with arbitrary field values.
 
 use padlock_core::entries::serialize::{deserialize_entry, serialize_entry};
 use padlock_core::entries::types::{Entry, EntryData, SSHKeyType, TOTPAlgorithm};

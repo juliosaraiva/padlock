@@ -1,6 +1,6 @@
 //! Session protocol wire format over SSH agent EXTENSION messages.
 //!
-//! Uses SSH_AGENTC_EXTENSION (type 27) with the extension name
+//! Uses `SSH_AGENTC_EXTENSION` (type 27) with the extension name
 //! `padlock-session@padlock.dev`. The payload is:
 //!
 //! ```text
@@ -9,8 +9,8 @@
 //! [...]     MessagePack-serialized payload
 //! ```
 //!
-//! Responses use SSH_AGENT_EXTENSION_RESPONSE (type 28) with the
-//! same protocol version prefix, or SSH_AGENT_FAILURE (5) on error.
+//! Responses use `SSH_AGENT_EXTENSION_RESPONSE` (type 28) with the
+//! same protocol version prefix, or `SSH_AGENT_FAILURE` (5) on error.
 
 use serde::{Deserialize, Serialize};
 
@@ -151,7 +151,7 @@ pub enum SessionResponse {
     Resumed(ResumeSessionResponse),
     /// Operation succeeded (destroy, destroy-all).
     Success,
-    /// Session status info (serialized as MessagePack).
+    /// Session status info (serialized as `MessagePack`).
     StatusInfo(Vec<u8>),
     /// Operation failed.
     Failure,
@@ -159,7 +159,7 @@ pub enum SessionResponse {
 
 /// Parse the extension payload (after the extension name) into a `SessionRequest`.
 ///
-/// Expected format: [version: u8] [msg_type: u8] [msgpack payload...]
+/// Expected format: [version: u8] [`msg_type`: u8] [msgpack payload...]
 ///
 /// # Errors
 ///
@@ -225,7 +225,7 @@ pub fn parse_session_request(payload: &[u8]) -> Result<SessionRequest> {
 
 /// Serialize a session response into wire bytes for the extension response.
 ///
-/// Returns the payload to embed in SSH_AGENT_EXTENSION_RESPONSE.
+/// Returns the payload to embed in `SSH_AGENT_EXTENSION_RESPONSE`.
 /// Format: [version: u8] [msgpack payload...]
 ///
 /// # Errors
@@ -276,6 +276,9 @@ pub fn serialize_session_response(response: &SessionResponse) -> Result<Vec<u8>>
 /// [N bytes] extension name
 /// [...]     session payload (version + type + msgpack)
 /// ```
+// Preserve existing integer conversion semantics. Bounds changes need separate review.
+#[allow(clippy::cast_possible_truncation)]
+#[must_use]
 pub fn build_extension_message(session_payload: &[u8]) -> Vec<u8> {
     let name_bytes = SESSION_EXTENSION_NAME.as_bytes();
     let payload_len = 1 + 4 + name_bytes.len() + session_payload.len();

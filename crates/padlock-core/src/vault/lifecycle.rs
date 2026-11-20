@@ -90,6 +90,8 @@ impl Vault {
     /// # Errors
     ///
     /// Returns an error if key derivation or storage write fails.
+    // Preserve existing integer conversion semantics. Bounds changes need separate review.
+    #[allow(clippy::cast_sign_loss)]
     pub fn init(
         passphrase: &str,
         storage: &dyn StorageBackend,
@@ -351,6 +353,8 @@ impl Vault {
     ///
     /// Returns `VaultError::Locked` if the vault is locked.
     /// Returns errors if serialization or storage write fails.
+    // Preserve existing integer conversion semantics. Bounds changes need separate review.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub fn write_to_storage(&mut self, storage: &dyn StorageBackend) -> crate::error::Result<()> {
         let mackey = self
             .mackey
@@ -393,6 +397,8 @@ impl Vault {
     /// # Errors
     ///
     /// Returns `VaultError::Locked` if the vault is locked.
+    // Preserve existing integer conversion semantics. Bounds changes need separate review.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn change_passphrase(
         &mut self,
         new_passphrase: &str,
@@ -568,6 +574,8 @@ mod tests {
         assert!(vault.write_to_storage(&storage).is_err());
     }
 
+    // Preserve existing integer conversion semantics. Bounds changes need separate review.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     #[test]
     fn test_vault_write_and_reopen_preserves_data() {
         let storage = InMemStorage::new();
@@ -623,6 +631,8 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // Preserve existing integer conversion semantics. Bounds changes need separate review.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     #[test]
     fn test_vault_change_passphrase() {
         let storage = InMemStorage::new();

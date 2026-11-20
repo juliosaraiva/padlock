@@ -89,7 +89,7 @@ pub struct JsonLinesAuditLog {
     /// Path to the audit log file.
     path: PathBuf,
     /// Mutex to serialize concurrent writes.
-    _lock: Mutex<()>,
+    lock: Mutex<()>,
 }
 
 impl JsonLinesAuditLog {
@@ -108,7 +108,7 @@ impl JsonLinesAuditLog {
         }
         Ok(Self {
             path,
-            _lock: Mutex::new(()),
+            lock: Mutex::new(()),
         })
     }
 
@@ -141,6 +141,8 @@ impl JsonLinesAuditLog {
     }
 }
 
+// Keep mutex internals out of the existing Debug output.
+#[allow(clippy::missing_fields_in_debug)]
 impl std::fmt::Debug for JsonLinesAuditLog {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JsonLinesAuditLog")
@@ -152,7 +154,7 @@ impl std::fmt::Debug for JsonLinesAuditLog {
 impl AuditLogger for JsonLinesAuditLog {
     fn log_event(&self, event: &AuditEvent) -> Result<()> {
         let _guard = self
-            ._lock
+            .lock
             .lock()
             .map_err(|e| crate::error::Error::Config(format!("audit log lock poisoned: {e}")))?;
 
@@ -243,13 +245,13 @@ mod tests {
         log.log_event(&event2).unwrap();
 
         // Read back
-        let events = log.read_events().unwrap();
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].action, AuditAction::VaultInit);
-        assert_eq!(events[0].result, AuditResult::Success);
-        assert_eq!(events[1].action, AuditAction::VaultUnlock);
-        assert_eq!(events[1].result, AuditResult::Failure);
-        assert_eq!(events[1].resource_id.as_deref(), Some("vault-1"));
+        let persisted = log.read_events().unwrap();
+        assert_eq!(persisted.len(), 2);
+        assert_eq!(persisted[0].action, AuditAction::VaultInit);
+        assert_eq!(persisted[0].result, AuditResult::Success);
+        assert_eq!(persisted[1].action, AuditAction::VaultUnlock);
+        assert_eq!(persisted[1].result, AuditResult::Failure);
+        assert_eq!(persisted[1].resource_id.as_deref(), Some("vault-1"));
     }
 
     #[test]

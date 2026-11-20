@@ -19,6 +19,8 @@ use crate::vault::lifecycle::Vault;
 ///
 /// Returns `VaultError::Locked` if the vault is not unlocked.
 /// Returns `EntryError::AlreadyExists` if an entry with the same name exists.
+// Preserve existing integer conversion semantics. Bounds changes need separate review.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn create_entry(
     vault: &mut Vault,
     name: String,
@@ -39,7 +41,7 @@ pub fn create_entry(
 
     // Serialize and encrypt
     let serialized = serialize_entry(&entry)?;
-    let encrypted = crate::vault::entries::encrypt_entry(&serialized, &kek)?;
+    let encrypted = crate::vault::entries::encrypt_entry(&serialized, kek)?;
 
     // Append to entries blob
     let mut blob = vault.entries_blob().to_vec();
@@ -75,6 +77,8 @@ pub fn create_entry(
 ///
 /// Returns `EntryError::NotFound` if the entry does not exist.
 /// Returns `VaultError::Locked` if the vault is not unlocked.
+// Preserve existing integer conversion semantics. Bounds changes need separate review.
+#[allow(clippy::cast_possible_truncation)]
 pub fn read_entry(vault: &Vault, id: &EntryId) -> crate::error::Result<Entry> {
     let kek = vault.kek()?;
     let uuid = *id.as_bytes();
@@ -107,6 +111,8 @@ pub fn read_entry(vault: &Vault, id: &EntryId) -> crate::error::Result<Entry> {
 ///
 /// Returns `EntryError::NotFound` if the entry does not exist.
 /// Returns `VaultError::Locked` if the vault is not unlocked.
+// Preserve existing integer conversion semantics. Bounds changes need separate review.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn update_entry(
     vault: &mut Vault,
     id: &EntryId,
@@ -120,7 +126,7 @@ pub fn update_entry(
 
     // Re-serialize and encrypt
     let serialized = serialize_entry(&entry)?;
-    let encrypted = crate::vault::entries::encrypt_entry(&serialized, &kek)?;
+    let encrypted = crate::vault::entries::encrypt_entry(&serialized, kek)?;
 
     // Append new version to blob (old data becomes dead space)
     let mut blob = vault.entries_blob().to_vec();
@@ -149,6 +155,8 @@ pub fn update_entry(
 ///
 /// Returns `EntryError::NotFound` if the entry does not exist.
 /// Returns `VaultError::Locked` if the vault is not unlocked.
+// Preserve existing integer conversion semantics. Bounds changes need separate review.
+#[allow(clippy::cast_sign_loss)]
 pub fn delete_entry(vault: &mut Vault, id: &EntryId) -> crate::error::Result<()> {
     let uuid = *id.as_bytes();
 
@@ -195,6 +203,8 @@ pub fn list_entries(vault: &Vault) -> crate::error::Result<Vec<(EntryId, String)
 /// # Errors
 ///
 /// Returns `VaultError::Locked` if the vault is not unlocked.
+// Preserve existing integer conversion semantics. Bounds changes need separate review.
+#[allow(clippy::cast_possible_truncation)]
 pub fn search_by_name(vault: &Vault, query: &str) -> crate::error::Result<Vec<Entry>> {
     let kek = vault.kek()?;
     let query_lower = query.to_lowercase();
@@ -229,6 +239,8 @@ pub fn search_by_name(vault: &Vault, query: &str) -> crate::error::Result<Vec<En
 /// # Errors
 ///
 /// Returns `VaultError::Locked` if the vault is not unlocked.
+// Preserve existing integer conversion semantics. Bounds changes need separate review.
+#[allow(clippy::cast_possible_truncation)]
 pub fn search_by_tag(vault: &Vault, tag: &str) -> crate::error::Result<Vec<Entry>> {
     let kek = vault.kek()?;
     let tag_lower = tag.to_lowercase();
@@ -401,7 +413,7 @@ mod tests {
 
         delete_entry(&mut vault, &entry.id).unwrap();
         let list = list_entries(&vault).unwrap();
-        assert!(list.is_empty());
+        assert_eq!(list, []);
     }
 
     #[test]

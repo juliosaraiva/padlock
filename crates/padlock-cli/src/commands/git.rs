@@ -55,7 +55,7 @@ pub struct GitVerifyCmd {
 /// Manage the allowed-signers file.
 #[derive(Args)]
 pub struct GitAllowedSignersCmd {
-    /// Output file path (default: ~/.padlock/allowed_signers).
+    /// Output file path (default: the `allowed_signers` file next to the vault).
     #[arg(long)]
     pub output: Option<String>,
 
@@ -65,6 +65,9 @@ pub struct GitAllowedSignersCmd {
 }
 
 /// Execute the git command group.
+///
+/// # Errors
+/// Returns an error if the signing operation, verification, or allowed-signers file operation fails.
 pub fn run(cmd: GitCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
     match cmd.command {
         GitSubcommand::Setup(setup) => run_setup(setup, vault_path, json),
@@ -74,6 +77,8 @@ pub fn run(cmd: GitCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
 }
 
 /// Run `padlock git setup`.
+// Keep ownership at the command dispatch boundary.
+#[allow(clippy::needless_pass_by_value)]
 fn run_setup(cmd: GitSetupCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
     let path = resolve_vault_path(vault_path);
     let storage = FilesystemBackend::new(path.clone());
@@ -175,6 +180,8 @@ fn run_setup(cmd: GitSetupCmd, vault_path: &str, json: bool) -> anyhow::Result<(
 }
 
 /// Run `padlock git verify`.
+// Keep ownership at the command dispatch boundary.
+#[allow(clippy::needless_pass_by_value)]
 fn run_verify(cmd: GitVerifyCmd, json: bool) -> anyhow::Result<()> {
     let result = git_config::verify_commit(&cmd.commit)?;
 
@@ -218,6 +225,8 @@ fn run_verify(cmd: GitVerifyCmd, json: bool) -> anyhow::Result<()> {
 }
 
 /// Run `padlock git allowed-signers`.
+// Keep ownership at the command dispatch boundary.
+#[allow(clippy::needless_pass_by_value)]
 fn run_allowed_signers(
     cmd: GitAllowedSignersCmd,
     vault_path: &str,
@@ -280,9 +289,10 @@ fn run_allowed_signers(
     let output_path = if let Some(ref out) = cmd.output {
         std::path::PathBuf::from(out)
     } else {
-        path.parent()
-            .map(|p| p.join("allowed_signers"))
-            .unwrap_or_else(|| std::path::PathBuf::from("allowed_signers"))
+        path.parent().map_or_else(
+            || std::path::PathBuf::from("allowed_signers"),
+            |p| p.join("allowed_signers"),
+        )
     };
 
     if let Some(parent) = output_path.parent() {

@@ -24,6 +24,8 @@ fn main() {
 
 /// Determine the exit code from an anyhow error by downcasting to
 /// `padlock_core::error::Error` variants.
+// Keep error families grouped in the exit-code mapping.
+#[allow(clippy::collapsible_match)]
 fn determine_exit_code(err: &anyhow::Error) -> i32 {
     if let Some(core_err) = err.downcast_ref::<padlock_core::error::Error>() {
         match core_err {

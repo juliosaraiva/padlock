@@ -290,7 +290,10 @@ fn test_delete_entry_removes_from_listing() {
     assert_eq!(list_entries(&vault).unwrap().len(), 1);
 
     delete_entry(&mut vault, &entry.id).unwrap();
-    assert!(list_entries(&vault).unwrap().is_empty());
+    assert_eq!(
+        list_entries(&vault).unwrap(),
+        [] as [(padlock_core::types::EntryId, std::string::String); 0]
+    );
 }
 
 #[test]
