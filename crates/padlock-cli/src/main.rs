@@ -10,11 +10,24 @@
 pub mod commands;
 pub mod output;
 
-use clap::Parser;
+use clap::{error::ErrorKind, CommandFactory, Parser};
 use commands::{Cli, Commands};
 
 fn main() {
-    let cli = Cli::parse();
+    let args: Vec<_> = std::env::args_os().collect();
+    if commands::set::contains_password_argument(&args[1..]) {
+        eprintln!("error: use the hidden prompt or --password-stdin for entry passwords");
+        std::process::exit(2);
+    }
+    let cli = Cli::parse_from(args);
+    if cli.json && matches!(&cli.command, Commands::Get(cmd) if cmd.password_only) {
+        Cli::command()
+            .error(
+                ErrorKind::ArgumentConflict,
+                "--password-only conflicts with --json",
+            )
+            .exit();
+    }
     if let Err(e) = run(cli) {
         let exit_code = determine_exit_code(&e);
         eprintln!("error: {e}");

@@ -929,6 +929,7 @@ dependencies = [
  "predicates",
  "rmp-serde",
  "rpassword",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
