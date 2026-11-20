@@ -16,7 +16,6 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-      security-events: write
     steps:
       # The pull_request event checks out GitHub's synthetic merge commit.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -28,4 +27,36 @@ jobs:
           build-mode: none
       - uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4
         with:
+          category: /language:rust
+          # PR events can submit SARIF with a read-only token. Pushes upload
+          # from a fresh job because Rust extraction can run build.rs.
+          upload: ${{ github.event_name == 'pull_request' && 'always' || 'never' }}
+          upload-database: false
+          output: ${{ runner.temp }}/codeql-results
+      - name: Pass push SARIF to upload job
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: rust-codeql-sarif
+          path: ${{ runner.temp }}/codeql-results/*.sarif
+          if-no-files-found: error
+          retention-days: 1
+
+  upload-push:
+    name: Upload Rust SARIF
+    if: github.event_name == 'push'
+    needs: rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      security-events: write
+    steps:
+      # This runner only handles SARIF data from the same workflow run.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: rust-codeql-sarif
+          path: ${{ runner.temp }}/codeql-results
+      - uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4
+        with:
+          sarif_file: ${{ runner.temp }}/codeql-results
           category: /language:rust
