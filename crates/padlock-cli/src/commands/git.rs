@@ -55,7 +55,7 @@ pub struct GitVerifyCmd {
 /// Manage the allowed-signers file.
 #[derive(Args)]
 pub struct GitAllowedSignersCmd {
-    /// Output file path (default: ~/.`padlock/allowed_signers`).
+    /// Output file path. Defaults to `allowed_signers` beside the vault.
     #[arg(long)]
     pub output: Option<String>,
 

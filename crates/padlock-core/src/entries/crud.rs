@@ -184,9 +184,9 @@ pub fn list_entries(vault: &Vault) -> crate::error::Result<Vec<(EntryId, String)
     Ok(entries)
 }
 
-/// Case-insensitive substring check without allocating.
+/// Case-insensitive substring check using ASCII case folding.
 ///
-/// Uses ASCII case folding, which is sufficient for entry titles.
+/// Allocates a folded copy of each nonempty needle.
 fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return true;
