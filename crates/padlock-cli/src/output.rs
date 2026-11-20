@@ -62,10 +62,7 @@ impl OutputFormatter {
                 println!("{} {msg}", "ok:".green().bold());
             }
             OutputMode::Json => {
-                println!(
-                    "{}",
-                    serde_json::json!({"status": "ok", "message": msg})
-                );
+                println!("{}", serde_json::json!({"status": "ok", "message": msg}));
             }
             OutputMode::Quiet => {}
         }
@@ -79,10 +76,7 @@ impl OutputFormatter {
                 eprintln!("{} {msg}", "error:".red().bold());
             }
             OutputMode::Json => {
-                eprintln!(
-                    "{}",
-                    serde_json::json!({"status": "error", "message": msg})
-                );
+                eprintln!("{}", serde_json::json!({"status": "error", "message": msg}));
             }
             OutputMode::Quiet => {
                 eprintln!("{msg}");

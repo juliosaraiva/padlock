@@ -10,7 +10,11 @@ use super::{prompt_passphrase, resolve_vault_path};
 #[derive(Args)]
 pub struct InitCmd {
     /// Path to the vault file.
-    #[arg(long, env = "PADLOCK_VAULT", default_value = "~/.padlock/vault.padlock")]
+    #[arg(
+        long,
+        env = "PADLOCK_VAULT",
+        default_value = "~/.padlock/vault.padlock"
+    )]
     vault_path: String,
 }
 

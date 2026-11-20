@@ -180,7 +180,12 @@ pub fn list_entries(vault: &Vault) -> crate::error::Result<Vec<(EntryId, String)
         .entries
         .values()
         .filter(|m| !m.deleted)
-        .map(|m| (EntryId::from_uuid(uuid::Uuid::from_bytes(m.uuid)), m.title.clone()))
+        .map(|m| {
+            (
+                EntryId::from_uuid(uuid::Uuid::from_bytes(m.uuid)),
+                m.title.clone(),
+            )
+        })
         .collect();
     Ok(entries)
 }
@@ -276,7 +281,9 @@ mod tests {
         }
         fn read_vault(&self) -> crate::error::Result<Vec<u8>> {
             self.data.lock().unwrap().clone().ok_or_else(|| {
-                Error::Vault(VaultError::NotFound { path: "<mem>".to_string() })
+                Error::Vault(VaultError::NotFound {
+                    path: "<mem>".to_string(),
+                })
             })
         }
         fn vault_exists(&self) -> crate::error::Result<bool> {

@@ -4,9 +4,7 @@
 //! for all EntryData variants with arbitrary field values.
 
 use padlock_core::entries::serialize::{deserialize_entry, serialize_entry};
-use padlock_core::entries::types::{
-    Entry, EntryData, SSHKeyType, TOTPAlgorithm,
-};
+use padlock_core::entries::types::{Entry, EntryData, SSHKeyType, TOTPAlgorithm};
 use proptest::prelude::*;
 
 // ============================================================
@@ -31,7 +29,7 @@ fn arb_totp_algorithm() -> impl Strategy<Value = TOTPAlgorithm> {
 
 fn arb_credential() -> impl Strategy<Value = EntryData> {
     (
-        "[a-zA-Z0-9_]{1,64}",       // username
+        "[a-zA-Z0-9_]{1,64}",         // username
         "[a-zA-Z0-9!@#$%^&*]{1,128}", // password
         proptest::option::of("[a-z]{3,10}://[a-z]{3,20}\\.[a-z]{2,5}"),
         proptest::option::of("[a-zA-Z0-9 ]{0,256}"),
@@ -47,29 +45,29 @@ fn arb_credential() -> impl Strategy<Value = EntryData> {
 fn arb_ssh_key() -> impl Strategy<Value = EntryData> {
     (
         arb_ssh_key_type(),
-        "[a-zA-Z0-9+/=\\-]{10,200}",   // private_key
-        "[a-zA-Z0-9+/= ]{10,100}",     // public_key
+        "[a-zA-Z0-9+/=\\-]{10,200}", // private_key
+        "[a-zA-Z0-9+/= ]{10,100}",   // public_key
         proptest::option::of("[a-zA-Z0-9]{4,32}"),
         proptest::option::of("[a-zA-Z0-9 ]{1,64}"),
     )
-        .prop_map(
-            |(key_type, private_key, public_key, passphrase, comment)| EntryData::SSHKey {
+        .prop_map(|(key_type, private_key, public_key, passphrase, comment)| {
+            EntryData::SSHKey {
                 key_type,
                 private_key,
                 public_key,
                 passphrase,
                 comment,
-            },
-        )
+            }
+        })
 }
 
 fn arb_totp() -> impl Strategy<Value = EntryData> {
     (
-        "[A-Z2-7]{16,32}",          // base32 secret
+        "[A-Z2-7]{16,32}", // base32 secret
         arb_totp_algorithm(),
         prop_oneof![Just(6u32), Just(8u32)],
         prop_oneof![Just(30u32), Just(60u32)],
-        "[a-zA-Z0-9@.]{3,64}",      // account_name
+        "[a-zA-Z0-9@.]{3,64}", // account_name
         proptest::option::of("[a-zA-Z0-9 ]{2,32}"),
     )
         .prop_map(
@@ -103,9 +101,9 @@ fn arb_binary() -> impl Strategy<Value = EntryData> {
 
 fn arb_netrc() -> impl Strategy<Value = EntryData> {
     (
-        "[a-z0-9.\\-]{3,64}",       // machine
-        "[a-zA-Z0-9_]{1,64}",       // login
-        "[a-zA-Z0-9!@#]{1,128}",    // password
+        "[a-z0-9.\\-]{3,64}",    // machine
+        "[a-zA-Z0-9_]{1,64}",    // login
+        "[a-zA-Z0-9!@#]{1,128}", // password
         proptest::option::of("[a-zA-Z0-9]{1,32}"),
     )
         .prop_map(|(machine, login, password, account)| EntryData::Netrc {
@@ -128,7 +126,7 @@ fn arb_entry_data() -> impl Strategy<Value = EntryData> {
 
 fn arb_entry() -> impl Strategy<Value = Entry> {
     (
-        "[a-zA-Z0-9_\\-]{1,64}",    // name
+        "[a-zA-Z0-9_\\-]{1,64}", // name
         arb_entry_data(),
         proptest::collection::vec("[a-z]{1,16}", 0..5), // tags
     )

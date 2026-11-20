@@ -89,9 +89,10 @@ impl SessionManager for SessionStore {
         duration: SessionDuration,
         algorithm: SessionAlgorithm,
     ) -> Result<SessionToken> {
-        let mut sessions = self.sessions.lock().map_err(|_| {
-            Error::Session(SessionError::KeyOperationFailed)
-        })?;
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| Error::Session(SessionError::KeyOperationFailed))?;
 
         // Enforce max sessions limit
         if sessions.len() >= self.max_sessions {
@@ -121,9 +122,10 @@ impl SessionManager for SessionStore {
         let session = Session {
             id: session_id,
             token: SessionToken::from_bytes(
-                token.as_bytes().try_into().map_err(|_| {
-                    Error::Session(SessionError::KeyOperationFailed)
-                })?,
+                token
+                    .as_bytes()
+                    .try_into()
+                    .map_err(|_| Error::Session(SessionError::KeyOperationFailed))?,
             ),
             wrapped_kek,
             wrapped_mackey,
@@ -144,9 +146,10 @@ impl SessionManager for SessionStore {
     }
 
     fn resume_session(&self, token: &[u8; 32]) -> Result<(SecretBuf, SecretBuf)> {
-        let mut sessions = self.sessions.lock().map_err(|_| {
-            Error::Session(SessionError::KeyOperationFailed)
-        })?;
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| Error::Session(SessionError::KeyOperationFailed))?;
 
         let session_id = Self::find_by_token(&sessions, token)
             .ok_or(Error::Session(SessionError::InvalidSession))?;
@@ -163,13 +166,18 @@ impl SessionManager for SessionStore {
         }
 
         // Unwrap KEK
-        let kek_plaintext = aead_decrypt(&session.sek, &session.kek_nonce, &[], &session.wrapped_kek)
-            .map_err(|_| Error::Session(SessionError::KeyOperationFailed))?;
+        let kek_plaintext =
+            aead_decrypt(&session.sek, &session.kek_nonce, &[], &session.wrapped_kek)
+                .map_err(|_| Error::Session(SessionError::KeyOperationFailed))?;
 
         // Unwrap MACKEY
-        let mackey_plaintext =
-            aead_decrypt(&session.sek, &session.mackey_nonce, &[], &session.wrapped_mackey)
-                .map_err(|_| Error::Session(SessionError::KeyOperationFailed))?;
+        let mackey_plaintext = aead_decrypt(
+            &session.sek,
+            &session.mackey_nonce,
+            &[],
+            &session.wrapped_mackey,
+        )
+        .map_err(|_| Error::Session(SessionError::KeyOperationFailed))?;
 
         session.use_count += 1;
 
@@ -180,9 +188,10 @@ impl SessionManager for SessionStore {
     }
 
     fn destroy_session(&self, token: &[u8; 32]) -> Result<()> {
-        let mut sessions = self.sessions.lock().map_err(|_| {
-            Error::Session(SessionError::KeyOperationFailed)
-        })?;
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| Error::Session(SessionError::KeyOperationFailed))?;
 
         let session_id = Self::find_by_token(&sessions, token)
             .ok_or(Error::Session(SessionError::InvalidSession))?;
@@ -192,9 +201,10 @@ impl SessionManager for SessionStore {
     }
 
     fn session_status(&self, token: &[u8; 32]) -> Result<SessionInfo> {
-        let sessions = self.sessions.lock().map_err(|_| {
-            Error::Session(SessionError::KeyOperationFailed)
-        })?;
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| Error::Session(SessionError::KeyOperationFailed))?;
 
         let session_id = Self::find_by_token(&sessions, token)
             .ok_or(Error::Session(SessionError::InvalidSession))?;
@@ -216,17 +226,19 @@ impl SessionManager for SessionStore {
     }
 
     fn destroy_all_sessions(&self) -> Result<()> {
-        let mut sessions = self.sessions.lock().map_err(|_| {
-            Error::Session(SessionError::KeyOperationFailed)
-        })?;
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| Error::Session(SessionError::KeyOperationFailed))?;
         sessions.clear();
         Ok(())
     }
 
     fn sweep_expired(&self) -> Result<usize> {
-        let mut sessions = self.sessions.lock().map_err(|_| {
-            Error::Session(SessionError::KeyOperationFailed)
-        })?;
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| Error::Session(SessionError::KeyOperationFailed))?;
 
         let now = Instant::now();
         let before = sessions.len();
@@ -464,6 +476,9 @@ mod tests {
         let info = store.session_status(&token_bytes).unwrap();
         assert!(info.valid);
         assert_eq!(info.use_count, 0);
-        assert_eq!(info.algorithm, SessionAlgorithm::XChaCha20Poly1305HkdfSha256);
+        assert_eq!(
+            info.algorithm,
+            SessionAlgorithm::XChaCha20Poly1305HkdfSha256
+        );
     }
 }

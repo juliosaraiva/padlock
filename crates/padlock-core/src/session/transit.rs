@@ -83,7 +83,10 @@ impl TransitKeyPair {
 /// # Errors
 ///
 /// Returns `SessionError::TransitError` if encryption fails.
-pub fn transit_encrypt(transit_key: &SecretBuf, plaintext: &[u8]) -> Result<([u8; NONCE_SIZE], Vec<u8>)> {
+pub fn transit_encrypt(
+    transit_key: &SecretBuf,
+    plaintext: &[u8],
+) -> Result<([u8; NONCE_SIZE], Vec<u8>)> {
     let nonce = generate_nonce();
     let ciphertext = aead_encrypt(transit_key, &nonce, &[], plaintext)
         .map_err(|_| Error::Session(SessionError::TransitError))?;
@@ -125,8 +128,8 @@ pub fn responder_derive_transit(
     let ikm = SecretBuf::from_bytes(&ikm_bytes);
     ikm_bytes.zeroize();
 
-    let transit_key =
-        expand_key(&ikm, TRANSIT_INFO, 32).map_err(|_| Error::Session(SessionError::TransitError))?;
+    let transit_key = expand_key(&ikm, TRANSIT_INFO, 32)
+        .map_err(|_| Error::Session(SessionError::TransitError))?;
 
     Ok((*our_public.as_bytes(), transit_key))
 }
@@ -154,8 +157,7 @@ mod tests {
     fn test_transit_encrypt_decrypt_round_trip() {
         let initiator = TransitKeyPair::generate();
         let initiator_pubkey = initiator.public_key_bytes();
-        let (responder_pubkey, transit_key) =
-            responder_derive_transit(&initiator_pubkey).unwrap();
+        let (responder_pubkey, transit_key) = responder_derive_transit(&initiator_pubkey).unwrap();
         let initiator_key = initiator.derive_transit_key(&responder_pubkey).unwrap();
 
         let plaintext = b"secret KEK material";

@@ -56,7 +56,11 @@ pub fn run(cmd: SearchCmd, vault_path: &str, fmt: &OutputFormatter) -> anyhow::R
         println!(
             "\n{} {}.",
             entries.len().to_string().bold(),
-            if entries.len() == 1 { "result" } else { "results" }
+            if entries.len() == 1 {
+                "result"
+            } else {
+                "results"
+            }
         );
     }
 

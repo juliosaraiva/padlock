@@ -3,12 +3,10 @@
 //! Tests create, read, update, delete, list, and search operations
 //! for all entry types through the vault CRUD API.
 
+use padlock_core::entries::types::{EntryData, EntryType, SSHKeyType, TOTPAlgorithm};
 use padlock_core::entries::{
     create_entry, delete_entry, list_entries, read_entry, search_by_name, search_by_tag,
     update_entry,
-};
-use padlock_core::entries::types::{
-    EntryData, EntryType, SSHKeyType, TOTPAlgorithm,
 };
 use padlock_core::error::Error;
 use padlock_core::traits::storage::StorageBackend;
@@ -34,13 +32,11 @@ impl StorageBackend for InMemStorage {
         Ok(())
     }
     fn read_vault(&self) -> padlock_core::error::Result<Vec<u8>> {
-        self.data
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| Error::Vault(padlock_core::error::VaultError::NotFound {
+        self.data.lock().unwrap().clone().ok_or_else(|| {
+            Error::Vault(padlock_core::error::VaultError::NotFound {
                 path: "<mem>".to_string(),
-            }))
+            })
+        })
     }
     fn vault_exists(&self) -> padlock_core::error::Result<bool> {
         Ok(self.data.lock().unwrap().is_some())

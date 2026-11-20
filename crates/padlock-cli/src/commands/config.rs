@@ -155,7 +155,10 @@ fn run_list(_cmd: ConfigListCmd, vault_path: &str, json: bool) -> anyhow::Result
                 entries.insert((*key).to_string(), serde_json::Value::String(value));
             }
         }
-        println!("{}", serde_json::to_string_pretty(&serde_json::Value::Object(entries))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::Value::Object(entries))?
+        );
     } else {
         for key in CONFIG_KEYS {
             if let Ok(value) = get_value(&config, key) {

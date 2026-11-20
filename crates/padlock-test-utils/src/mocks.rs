@@ -146,7 +146,10 @@ impl TestAuditLogger {
     /// Get all recorded audit events.
     #[must_use]
     pub fn events(&self) -> Vec<AuditEvent> {
-        self.events.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 

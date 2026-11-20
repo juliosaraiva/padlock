@@ -49,7 +49,10 @@ pub fn aead_encrypt(key: &[u8], nonce: &[u8], aad: &[u8], plaintext: &[u8]) -> R
         .map_err(|e| Error::Crypto(CryptoError::EncryptionFailed(e.to_string())))?;
 
     let nonce = chacha20poly1305::XNonce::from_slice(nonce);
-    let payload = Payload { msg: plaintext, aad };
+    let payload = Payload {
+        msg: plaintext,
+        aad,
+    };
 
     cipher
         .encrypt(nonce, payload)

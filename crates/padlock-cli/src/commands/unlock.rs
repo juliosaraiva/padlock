@@ -17,7 +17,10 @@ pub fn run(_cmd: UnlockCmd, vault_path: &str, json: bool) -> anyhow::Result<()> 
     let storage = FilesystemBackend::new(path.clone());
 
     if !storage.vault_exists()? {
-        anyhow::bail!("vault not found at {}. Run `padlock init` first.", path.display());
+        anyhow::bail!(
+            "vault not found at {}. Run `padlock init` first.",
+            path.display()
+        );
     }
 
     let passphrase = prompt_passphrase("Passphrase: ")?;

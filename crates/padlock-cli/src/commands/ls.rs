@@ -20,9 +20,7 @@ pub fn run(_cmd: LsCmd, vault_path: &str, fmt: &OutputFormatter) -> anyhow::Resu
     if fmt.is_json() {
         let items: Vec<_> = entries
             .iter()
-            .map(|(id, name)| {
-                serde_json::json!({"id": id.to_string(), "name": name})
-            })
+            .map(|(id, name)| serde_json::json!({"id": id.to_string(), "name": name}))
             .collect();
         fmt.json_list(&items);
     } else if fmt.is_quiet() {
@@ -40,7 +38,11 @@ pub fn run(_cmd: LsCmd, vault_path: &str, fmt: &OutputFormatter) -> anyhow::Resu
         println!(
             "\n{} {} total.",
             entries.len().to_string().bold(),
-            if entries.len() == 1 { "entry" } else { "entries" }
+            if entries.len() == 1 {
+                "entry"
+            } else {
+                "entries"
+            }
         );
     }
 

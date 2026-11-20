@@ -4,8 +4,8 @@
 //! KDF determinism, and rejection of wrong keys and tampered data.
 
 use padlock_core::crypto::aead::{
-    aead_decrypt, aead_encrypt, generate_dek, generate_nonce, wrap_dek, unwrap_dek,
-    KEY_SIZE, NONCE_SIZE, TAG_SIZE,
+    aead_decrypt, aead_encrypt, generate_dek, generate_nonce, unwrap_dek, wrap_dek, KEY_SIZE,
+    NONCE_SIZE, TAG_SIZE,
 };
 use padlock_core::crypto::hmac::{compute_hmac, verify_hmac, HMAC_SIZE};
 use padlock_core::crypto::kdf::{derive_pdk_for_testing, generate_argon2_salt, SALT_LENGTH};

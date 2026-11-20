@@ -253,7 +253,9 @@ mod tests {
             "deploy-key".to_string(),
             EntryData::SSHKey {
                 key_type: SSHKeyType::ED25519,
-                private_key: "-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n-----END OPENSSH PRIVATE KEY-----".to_string(),
+                private_key:
+                    "-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n-----END OPENSSH PRIVATE KEY-----"
+                        .to_string(),
                 public_key: "ssh-ed25519 AAAA... user@host".to_string(),
                 passphrase: None,
                 comment: Some("deploy key".to_string()),

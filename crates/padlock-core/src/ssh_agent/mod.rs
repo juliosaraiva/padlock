@@ -20,4 +20,4 @@ pub mod handler;
 pub mod protocol;
 
 pub use handler::{AgentHandler, LoadedKey};
-pub use protocol::{AgentMessage, AgentResponse, parse_message, serialize_response};
+pub use protocol::{parse_message, serialize_response, AgentMessage, AgentResponse};

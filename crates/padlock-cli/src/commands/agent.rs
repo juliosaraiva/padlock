@@ -218,9 +218,9 @@ async fn run_agent_foreground(
     // Create session store for caching vault keys
     let session_store = Arc::new(SessionStore::new());
 
-    let handler = std::sync::Arc::new(std::sync::Mutex::new(
-        AgentHandler::with_session_store(session_store.clone()),
-    ));
+    let handler = std::sync::Arc::new(std::sync::Mutex::new(AgentHandler::with_session_store(
+        session_store.clone(),
+    )));
 
     eprintln!("Padlock SSH agent listening on {}", socket_path.display());
 
@@ -451,14 +451,12 @@ fn run_list(vault_path: &str, json: bool) -> anyhow::Result<()> {
             if offset + 4 > resp_buf.len() {
                 break;
             }
-            let blob_len =
-                u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
+            let blob_len = u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
             offset += 4 + blob_len;
             if offset + 4 > resp_buf.len() {
                 break;
             }
-            let comment_len =
-                u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
+            let comment_len = u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
             offset += 4;
             if offset + comment_len > resp_buf.len() {
                 break;
@@ -480,14 +478,12 @@ fn run_list(vault_path: &str, json: bool) -> anyhow::Result<()> {
             if offset + 4 > resp_buf.len() {
                 break;
             }
-            let blob_len =
-                u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
+            let blob_len = u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
             offset += 4 + blob_len;
             if offset + 4 > resp_buf.len() {
                 break;
             }
-            let comment_len =
-                u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
+            let comment_len = u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
             offset += 4;
             if offset + comment_len > resp_buf.len() {
                 break;

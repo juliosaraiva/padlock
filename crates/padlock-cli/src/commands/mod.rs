@@ -28,12 +28,9 @@ use clap::{Parser, Subcommand};
 use padlock_core::crypto::secret_buf::SecretBuf;
 use padlock_core::session::protocol::{
     self, build_extension_message, CreateSessionRequest, CreateSessionResponse,
-    ResumeSessionRequest, ResumeSessionResponse, SSH_AGENT_EXTENSION_RESPONSE,
-    PROTOCOL_VERSION,
+    ResumeSessionRequest, ResumeSessionResponse, PROTOCOL_VERSION, SSH_AGENT_EXTENSION_RESPONSE,
 };
-use padlock_core::session::transit::{
-    transit_decrypt, TransitKeyPair, X25519_PUBKEY_SIZE,
-};
+use padlock_core::session::transit::{transit_decrypt, TransitKeyPair, X25519_PUBKEY_SIZE};
 use padlock_core::session::types::{SessionAlgorithm, SessionDuration, SESSION_TOKEN_SIZE};
 use padlock_core::vault::lifecycle::{KdfParams, Vault};
 use padlock_core::vault::storage::FilesystemBackend;
@@ -44,7 +41,11 @@ use padlock_core::vault::storage::FilesystemBackend;
 #[command(version, about = "Encrypted credential manager for developers")]
 pub struct Cli {
     /// Path to the vault file.
-    #[arg(long, env = "PADLOCK_VAULT", default_value = "~/.padlock/vault.padlock")]
+    #[arg(
+        long,
+        env = "PADLOCK_VAULT",
+        default_value = "~/.padlock/vault.padlock"
+    )]
     pub vault_path: String,
 
     /// Output in JSON format.
@@ -115,7 +116,8 @@ pub fn resolve_vault_path(path: &str) -> PathBuf {
 
 /// Prompt for the vault passphrase.
 pub fn prompt_passphrase(prompt: &str) -> anyhow::Result<String> {
-    rpassword::prompt_password(prompt).map_err(|e| anyhow::anyhow!("failed to read passphrase: {e}"))
+    rpassword::prompt_password(prompt)
+        .map_err(|e| anyhow::anyhow!("failed to read passphrase: {e}"))
 }
 
 /// Get the padlock directory from the vault path.
@@ -210,7 +212,9 @@ fn try_resume_session(vault_path: &str) -> Option<(SecretBuf, SecretBuf)> {
     let message = build_extension_message(&session_payload);
 
     let mut stream = std::os::unix::net::UnixStream::connect(&socket).ok()?;
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok()?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .ok()?;
     stream.write_all(&message).ok()?;
 
     // Read response
@@ -290,7 +294,9 @@ fn create_daemon_session(
     let message = build_extension_message(&session_payload);
 
     let mut stream = std::os::unix::net::UnixStream::connect(&socket).ok()?;
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok()?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .ok()?;
     stream.write_all(&message).ok()?;
 
     // Read response
@@ -382,13 +388,9 @@ pub fn open_vault_with_session(vault_path: &str) -> anyhow::Result<Vault> {
     // Try to create a session for next time
     if let (Ok(kek), Ok(mackey)) = (vault.kek(), vault.mackey()) {
         let vault_id = vault.header().vault_uuid;
-        if let Some(token) = create_daemon_session(
-            vault_path,
-            kek,
-            mackey,
-            &vault_id,
-            SessionDuration::OneHour,
-        ) {
+        if let Some(token) =
+            create_daemon_session(vault_path, kek, mackey, &vault_id, SessionDuration::OneHour)
+        {
             let _ = save_session_token(vault_path, &token);
         }
     }
@@ -417,13 +419,9 @@ pub fn open_vault_mut_with_session(vault_path: &str) -> anyhow::Result<(Vault, F
     // Try to create a session
     if let (Ok(kek), Ok(mackey)) = (vault.kek(), vault.mackey()) {
         let vault_id = vault.header().vault_uuid;
-        if let Some(token) = create_daemon_session(
-            vault_path,
-            kek,
-            mackey,
-            &vault_id,
-            SessionDuration::OneHour,
-        ) {
+        if let Some(token) =
+            create_daemon_session(vault_path, kek, mackey, &vault_id, SessionDuration::OneHour)
+        {
             let _ = save_session_token(vault_path, &token);
         }
     }

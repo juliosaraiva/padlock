@@ -3,11 +3,11 @@
 //! Tests init, open, lock, unlock, passphrase change, and
 //! data persistence across vault reopen cycles.
 
-use padlock_core::vault::lifecycle::{KdfParams, Vault, VaultState};
-use padlock_core::vault::storage::FilesystemBackend;
+use padlock_core::types::Timestamp;
 use padlock_core::vault::entries::{decrypt_entry, encrypt_entry};
 use padlock_core::vault::format::EntryMetadata;
-use padlock_core::types::Timestamp;
+use padlock_core::vault::lifecycle::{KdfParams, Vault, VaultState};
+use padlock_core::vault::storage::FilesystemBackend;
 use tempfile::TempDir;
 
 fn test_params() -> KdfParams {

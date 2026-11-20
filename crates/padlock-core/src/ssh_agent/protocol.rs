@@ -293,7 +293,9 @@ mod tests {
         let msg = parse_message(&data).unwrap();
         match msg {
             AgentMessage::SignRequest {
-                key_blob, data: sign_data, flags,
+                key_blob,
+                data: sign_data,
+                flags,
             } => {
                 assert_eq!(key_blob, b"key1");
                 assert_eq!(sign_data, b"hello");
@@ -316,9 +318,7 @@ mod tests {
     #[test]
     fn test_serialize_identities_answer_with_keys() {
         let response = AgentResponse::IdentitiesAnswer {
-            keys: vec![
-                (b"pubkey1".to_vec(), "comment1".to_string()),
-            ],
+            keys: vec![(b"pubkey1".to_vec(), "comment1".to_string())],
         };
         let bytes = serialize_response(&response);
         assert!(bytes.len() > 9);

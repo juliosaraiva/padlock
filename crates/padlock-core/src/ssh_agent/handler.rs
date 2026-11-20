@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use crate::session::manager::SessionStore;
 use crate::session::protocol::{
-    self, CreateSessionRequest, CreateSessionResponse, DestroySessionRequest,
-    ResumeSessionRequest, ResumeSessionResponse, SessionRequest, SessionResponse,
-    StatusSessionRequest, SESSION_EXTENSION_NAME,
+    self, CreateSessionRequest, CreateSessionResponse, DestroySessionRequest, ResumeSessionRequest,
+    ResumeSessionResponse, SessionRequest, SessionResponse, StatusSessionRequest,
+    SESSION_EXTENSION_NAME,
 };
 use crate::session::transit::{responder_derive_transit, transit_encrypt};
 use crate::session::types::{SessionAlgorithm, SessionDuration, SESSION_TOKEN_SIZE};
@@ -277,12 +277,10 @@ impl AgentHandler {
         };
 
         match store.destroy_session(&token) {
-            Ok(()) => {
-                match protocol::serialize_session_response(&SessionResponse::Success) {
-                    Ok(payload) => AgentResponse::ExtensionResponse { payload },
-                    Err(_) => AgentResponse::Failure,
-                }
-            }
+            Ok(()) => match protocol::serialize_session_response(&SessionResponse::Success) {
+                Ok(payload) => AgentResponse::ExtensionResponse { payload },
+                Err(_) => AgentResponse::Failure,
+            },
             Err(_) => AgentResponse::Failure,
         }
     }
@@ -317,12 +315,10 @@ impl AgentHandler {
     /// Handle a DestroyAll request.
     fn handle_session_destroy_all(&self, store: &SessionStore) -> AgentResponse {
         match store.destroy_all_sessions() {
-            Ok(()) => {
-                match protocol::serialize_session_response(&SessionResponse::Success) {
-                    Ok(payload) => AgentResponse::ExtensionResponse { payload },
-                    Err(_) => AgentResponse::Failure,
-                }
-            }
+            Ok(()) => match protocol::serialize_session_response(&SessionResponse::Success) {
+                Ok(payload) => AgentResponse::ExtensionResponse { payload },
+                Err(_) => AgentResponse::Failure,
+            },
             Err(_) => AgentResponse::Failure,
         }
     }
@@ -524,7 +520,10 @@ mod tests {
             flags: 0,
         });
 
-        if let AgentResponse::SignResponse { signature: sig_blob } = response {
+        if let AgentResponse::SignResponse {
+            signature: sig_blob,
+        } = response
+        {
             // Parse the SSH signature blob to extract raw signature
             // Format: string "ssh-ed25519" + string signature_bytes
             let type_len = u32::from_be_bytes(sig_blob[0..4].try_into().unwrap()) as usize;
