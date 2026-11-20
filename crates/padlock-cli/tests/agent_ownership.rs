@@ -30,7 +30,7 @@ impl Fixture {
     }
 
     fn path(&self, name: &str) -> PathBuf {
-        self.directory.path().join(name)
+        self.vault.parent().unwrap().join(name)
     }
 
     fn cli(&self) -> Command {
@@ -117,6 +117,33 @@ fn autostart_without_a_terminal() {
         .stdin(Stdio::null())
         .exec();
     panic!("exec: {error}");
+}
+
+#[test]
+fn fresh_nested_parent_is_private_and_existing_parent_mode_is_preserved() {
+    let mut fixture = Fixture::new();
+    let first = fixture.directory.path().join("first");
+    let parent = first.join("second");
+    fixture.vault = parent.join("test.vault");
+    assert!(!first.exists());
+
+    assert_eq!(json(&fixture.agent("start"))["status"], "started");
+    fixture.ready();
+    for path in [&first, &parent] {
+        let metadata = fs::symlink_metadata(path).unwrap();
+        assert!(metadata.is_dir());
+        assert_eq!(metadata.uid(), geteuid().as_raw());
+        assert_eq!(metadata.mode() & 0o777, 0o700);
+    }
+    assert_eq!(json(&fixture.agent("stop"))["status"], "stopped");
+    fixture.assert_clean();
+
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o750)).unwrap();
+    assert_eq!(json(&fixture.agent("start"))["status"], "started");
+    fixture.ready();
+    assert_eq!(fs::symlink_metadata(&parent).unwrap().mode() & 0o777, 0o750);
+    assert_eq!(json(&fixture.agent("stop"))["status"], "stopped");
+    fixture.assert_clean();
 }
 
 #[test]

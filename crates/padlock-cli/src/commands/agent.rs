@@ -5,7 +5,7 @@
 
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -18,7 +18,7 @@ use padlock_core::session::protocol::{build_extension_message, SESSION_EXTENSION
 use padlock_core::ssh_agent::protocol::{parse_message, serialize_response, AgentMessage};
 use padlock_core::ssh_agent::{AgentHandler, AgentResponse};
 use padlock_core::traits::session::SessionManager;
-use rustix::fs::{fcntl_setfl, flock, FlockOperation, Mode, OFlags};
+use rustix::fs::{access, fcntl_setfl, flock, Access, FlockOperation, Mode, OFlags};
 use rustix::io::{fcntl_setfd, FdFlags};
 use rustix::net::{connect, socket, AddressFamily, SocketAddrUnix, SocketType};
 use rustix::process::{geteuid, umask};
@@ -296,12 +296,52 @@ pub fn run(cmd: AgentCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
     }
 }
 
+fn prepare_agent_parent(socket: &Path) -> io::Result<()> {
+    let Some(parent) = socket.parent().filter(|path| !path.as_os_str().is_empty()) else {
+        return Ok(());
+    };
+
+    match fs::metadata(parent) {
+        Ok(metadata) if metadata.is_dir() => return Ok(access(parent, Access::EXEC_OK)?),
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "agent parent is not a directory",
+            ))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    // Only the new directories get private permissions. Do this before
+    // tightening the socket umask, which masks directory search permission.
+    let previous = umask(Mode::from_bits_truncate(0o077));
+    let created = fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent);
+    umask(previous);
+    created?;
+    let metadata = fs::symlink_metadata(parent)?;
+    if !metadata.is_dir()
+        || metadata.uid() != geteuid().as_raw()
+        || metadata.mode() & 0o777 != 0o700
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "unsafe newly created agent parent",
+        ));
+    }
+    Ok(access(parent, Access::EXEC_OK)?)
+}
+
 /// Start the SSH agent daemon.
 #[allow(clippy::needless_pass_by_value)]
 fn run_start(cmd: AgentStartCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
     let socket_path = agent_socket_path(vault_path);
     let pid_path = agent_pid_path(vault_path);
     if cmd.foreground {
+        prepare_agent_parent(&socket_path)?;
         // Set owner-only permissions before creating the socket or runtime threads.
         let private = Mode::from_bits_truncate(0o177);
         umask(umask(private) | private);
@@ -341,11 +381,6 @@ fn run_start(cmd: AgentStartCmd, vault_path: &str, json: bool) -> anyhow::Result
 /// Run the agent in the foreground (async).
 async fn run_agent_foreground(socket_path: PathBuf, pid_path: PathBuf) -> anyhow::Result<()> {
     use tokio::net::UnixListener;
-
-    // Create parent directory
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
 
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let _lock = take_agent_lock(&socket_path)?;
