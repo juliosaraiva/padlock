@@ -384,11 +384,18 @@ pub fn serialize_index(index: &VaultIndex) -> crate::error::Result<Vec<u8>> {
 ///
 /// Returns `VaultError::InvalidFormat` if deserialization fails.
 pub fn deserialize_index(data: &[u8]) -> crate::error::Result<VaultIndex> {
-    rmp_serde::from_slice(data).map_err(|e| {
+    let mut decoder = rmp_serde::Deserializer::new(std::io::Cursor::new(data));
+    let index = VaultIndex::deserialize(&mut decoder).map_err(|e| {
         Error::Vault(VaultError::InvalidFormat {
             reason: format!("index deserialization failed: {e}"),
         })
-    })
+    })?;
+    if decoder.position() != data.len() as u64 {
+        return Err(Error::Vault(VaultError::InvalidFormat {
+            reason: "trailing bytes in vault index".to_owned(),
+        }));
+    }
+    Ok(index)
 }
 
 #[cfg(test)]

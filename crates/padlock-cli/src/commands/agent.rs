@@ -295,7 +295,7 @@ async fn accept_loop(
                 }
 
                 // Read message payload
-                let mut msg_buf = vec![0u8; msg_len];
+                let mut msg_buf = zeroize::Zeroizing::new(vec![0u8; msg_len]);
                 if stream.read_exact(&mut msg_buf).await.is_err() {
                     break;
                 }
@@ -309,6 +309,7 @@ async fn accept_loop(
                     Err(_) => AgentResponse::Failure,
                 };
 
+                drop(msg_buf);
                 let response_bytes = serialize_response(&response);
                 if stream.write_all(&response_bytes).await.is_err() {
                     break;

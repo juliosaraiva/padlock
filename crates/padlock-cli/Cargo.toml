@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 padlock-core = { path = "../padlock-core" }
+zeroize = "=1.8.1"
 
 # CLI framework
 clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }

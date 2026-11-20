@@ -109,7 +109,7 @@ impl AgentHandler {
 
     /// Handle an incoming agent message and produce a response.
     #[must_use]
-    pub fn handle_message(&self, message: &AgentMessage) -> AgentResponse {
+    pub fn handle_message(&self, message: &AgentMessage<'_>) -> AgentResponse {
         match message {
             AgentMessage::RequestIdentities => {
                 let keys = self
@@ -134,7 +134,7 @@ impl AgentHandler {
             }
             AgentMessage::Extension { name, payload } => {
                 if name == SESSION_EXTENSION_NAME {
-                    self.handle_session_extension(payload)
+                    self.handle_session_extension(payload.as_bytes())
                 } else {
                     AgentResponse::Failure
                 }
@@ -185,10 +185,6 @@ impl AgentHandler {
             Err(_) => return AgentResponse::Failure,
         };
 
-        // Accept KEK and MACKEY directly (transport secured by socket permissions)
-        let kek = crate::crypto::secret_buf::SecretBuf::from_bytes(&req.encrypted_kek);
-        let mackey = crate::crypto::secret_buf::SecretBuf::from_bytes(&req.encrypted_mackey);
-
         // Parse idle timeout from request, falling back to default
         let idle_timeout = if req.idle_timeout_secs > 0 {
             std::time::Duration::from_secs(req.idle_timeout_secs)
@@ -197,9 +193,14 @@ impl AgentHandler {
         };
 
         // Create session
-        let Ok(token) =
-            store.create_session(&kek, &mackey, &vault_id, duration, idle_timeout, algorithm)
-        else {
+        let Ok(token) = store.create_session(
+            &req.encrypted_kek,
+            &req.encrypted_mackey,
+            &vault_id,
+            duration,
+            idle_timeout,
+            algorithm,
+        ) else {
             return AgentResponse::Failure;
         };
 
