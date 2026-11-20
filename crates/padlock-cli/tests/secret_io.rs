@@ -316,3 +316,53 @@ fn malformed_and_oversize_input_fail_before_vault_write() {
         }
     }
 }
+
+#[test]
+fn rejected_post_terminator_arguments_are_redacted() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = fixture(dir.path());
+    let vault = storage.vault_path();
+    let original = fs::read(vault).unwrap();
+    let snapshots = fs::read_dir(dir.path()).unwrap().count();
+
+    for value in [
+        format!("--password={SENTINEL}"),
+        format!("-p{SENTINEL}"),
+        SENTINEL.to_owned(),
+    ] {
+        let (output, transcript) = run_cli(vault, &["set", "example", "--", &value], None, &[]);
+        assert_eq!(output.status.code(), Some(2));
+        assert_no_echo(&output, &transcript);
+        assert_eq!(fs::read(vault).unwrap(), original);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), snapshots);
+    }
+}
+
+#[test]
+fn password_like_literal_names_are_preserved() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = fixture(dir.path());
+    let vault = storage.vault_path();
+    let passphrase = (b"Passphrase: ".as_slice(), PASSPHRASE);
+
+    for name in ["--password=literal-name", "-pliteral-name"] {
+        let (output, transcript) = run_cli(
+            vault,
+            &["set", "--password-stdin", "--", name],
+            Some(SENTINEL.as_bytes()),
+            &[passphrase],
+        );
+        assert!(output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains(name));
+        assert_no_echo(&output, &transcript);
+
+        let (output, _) = run_cli(
+            vault,
+            &["get", "--password-only", "--", name],
+            None,
+            &[passphrase],
+        );
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, SENTINEL.as_bytes());
+    }
+}

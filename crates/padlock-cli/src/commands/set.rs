@@ -41,10 +41,8 @@ pub struct SetCmd {
     notes: Option<String>,
 }
 
-// Detect legacy password syntax before Clap can include its value in an
-// error. Only inspect set options, leaving other commands and literal arguments
-// after the option terminator alone.
-pub(crate) fn contains_password_argument(args: &[OsString]) -> bool {
+// Identify set before Clap parses values or builds diagnostics.
+pub(crate) fn set_arguments(args: &[OsString]) -> Option<&[OsString]> {
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_encoded_bytes() {
@@ -53,19 +51,22 @@ pub(crate) fn contains_password_argument(args: &[OsString]) -> bool {
             }
             value if value.starts_with(b"--vault-path=") => {}
             b"--json" | b"--quiet" | b"--no-color" | b"--no-session" => {}
-            b"set" => {
-                return args.take_while(|arg| *arg != "--").any(|arg| {
-                    let arg = arg.as_encoded_bytes();
-                    arg == b"--password"
-                        || arg.starts_with(b"--password=")
-                        || arg.starts_with(b"-p")
-                        || arg.starts_with(b"--password-stdin=")
-                });
-            }
-            _ => return false,
+            b"set" => return Some(args.as_slice()),
+            _ => return None,
         }
     }
-    false
+    None
+}
+
+// After --, Clap treats these spellings as positional entry names.
+pub(crate) fn contains_password_option(args: &[OsString]) -> bool {
+    args.iter().take_while(|arg| *arg != "--").any(|arg| {
+        let arg = arg.as_encoded_bytes();
+        arg == b"--password"
+            || arg.starts_with(b"--password=")
+            || arg.starts_with(b"-p")
+            || arg.starts_with(b"--password-stdin=")
+    })
 }
 
 struct HiddenTerminal {
