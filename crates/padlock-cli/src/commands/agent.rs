@@ -3,16 +3,26 @@
 //! Provides commands to start, stop, and query the SSH agent daemon
 //! that serves vault keys to SSH clients.
 
-use std::io::{Read, Write};
+use std::fs::{self, File, Metadata};
+use std::io::{self, Read, Write};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use clap::{Args, Subcommand};
 use padlock_core::session::manager::SessionStore;
-use padlock_core::ssh_agent::protocol::{parse_message, serialize_response};
+use padlock_core::session::protocol::{build_extension_message, SESSION_EXTENSION_NAME};
+use padlock_core::ssh_agent::protocol::{parse_message, serialize_response, AgentMessage};
 use padlock_core::ssh_agent::{AgentHandler, AgentResponse};
 use padlock_core::traits::session::SessionManager;
+use rustix::fs::{fcntl_setfl, flock, FlockOperation, Mode, OFlags};
+use rustix::io::{fcntl_setfd, FdFlags};
+use rustix::net::{connect, socket, AddressFamily, SocketAddrUnix, SocketType};
+use rustix::process::{geteuid, umask};
+use tokio::sync::Notify;
 
 use super::resolve_vault_path;
 
@@ -81,32 +91,191 @@ fn agent_pid_path(vault_path: &str) -> PathBuf {
     )
 }
 
-/// Check if the agent is running by checking the PID file, process, and socket.
-fn is_agent_running(vault_path: &str) -> bool {
-    let pid_path = agent_pid_path(vault_path);
-    if !pid_path.exists() {
-        return false;
+const AGENT_READY_TIMEOUT: Duration = Duration::from_secs(3);
+const STOP_PAYLOAD: &[u8] = b"padlock-agent-stop-v1";
+
+fn socket_metadata(path: &Path) -> io::Result<Metadata> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_socket()
+        || metadata.uid() != geteuid().as_raw()
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.nlink() != 1
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "unsafe agent socket",
+        ));
     }
-    if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
-        if let Ok(pid) = pid_str.trim().parse::<u32>() {
-            let process_alive = std::process::Command::new("kill")
-                .arg("-0")
-                .arg(pid.to_string())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok_and(|status| status.success());
-            if !process_alive {
-                return false;
+    Ok(metadata)
+}
+
+fn probe_owned_socket(path: &Path) -> io::Result<()> {
+    socket_metadata(path)?;
+    let fd = socket(AddressFamily::UNIX, SocketType::STREAM, None)?;
+    fcntl_setfd(&fd, FdFlags::CLOEXEC)?;
+    fcntl_setfl(&fd, OFlags::NONBLOCK)?;
+    connect(&fd, &SocketAddrUnix::new(path)?)?;
+    Ok(())
+}
+
+fn missing_or_stale(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+    )
+}
+
+fn checked_owner_file(metadata: &Metadata) -> bool {
+    metadata.is_file() && metadata.uid() == geteuid().as_raw() && metadata.nlink() == 1
+}
+
+fn read_agent_pid(path: &Path) -> Option<u32> {
+    let file = File::from(
+        rustix::fs::open(
+            path,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .ok()?,
+    );
+    let metadata = file.metadata().ok()?;
+    if !checked_owner_file(&metadata) || metadata.len() > 32 {
+        return None;
+    }
+    let mut value = String::new();
+    file.take(32).read_to_string(&mut value).ok()?;
+    value.trim().parse().ok()
+}
+
+pub(super) fn ensure_background(vault_path: &str) -> io::Result<bool> {
+    let socket = agent_socket_path(vault_path);
+    let mut child = match probe_owned_socket(&socket) {
+        Ok(()) => None,
+        Err(error) if missing_or_stale(&error) => Some(
+            Command::new(std::env::current_exe()?)
+                .args(["--vault-path", vault_path, "agent", "start", "--foreground"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?,
+        ),
+        Err(error) => return Err(error),
+    };
+    let pid_path = agent_pid_path(vault_path);
+    let deadline = Instant::now() + AGENT_READY_TIMEOUT;
+    loop {
+        match probe_owned_socket(&socket) {
+            Ok(()) => {
+                if let Some(pid) = read_agent_pid(&pid_path) {
+                    return Ok(child.as_ref().is_some_and(|child| child.id() == pid));
+                }
             }
-            // Also verify socket is connectable (process could be unrelated
-            // or the child may not have bound the socket yet)
-            let socket_path = agent_socket_path(vault_path);
-            return socket_path.exists()
-                && std::os::unix::net::UnixStream::connect(&socket_path).is_ok();
+            Err(error)
+                if missing_or_stale(&error) || error.kind() == io::ErrorKind::PermissionDenied => {}
+            Err(error) => return Err(error),
+        }
+        // A losing child can exit before the competing lock holder binds.
+        if let Some(child) = &mut child {
+            let _ = child.try_wait()?;
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "agent did not become ready",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+struct AgentArtifact {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl AgentArtifact {
+    fn new(path: PathBuf, metadata: &Metadata) -> Self {
+        Self {
+            path,
+            device: metadata.dev(),
+            inode: metadata.ino(),
         }
     }
-    false
+
+    fn still_owned(&self) -> bool {
+        fs::symlink_metadata(&self.path)
+            .is_ok_and(|metadata| metadata.dev() == self.device && metadata.ino() == self.inode)
+    }
+
+    fn cleanup(&self) {
+        if self.still_owned() {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+// A live daemon holds this lock until its PID and socket cleanup is complete.
+// The directory must be stable and writable only by trusted principals.
+fn take_agent_lock(socket_path: &Path) -> io::Result<File> {
+    let lock_path = socket_path.with_file_name("agent.lock");
+    let file = File::from(rustix::fs::open(
+        lock_path,
+        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )?);
+    let metadata = file.metadata()?;
+    if !checked_owner_file(&metadata) || metadata.mode() & 0o777 != 0o600 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "unsafe agent lock",
+        ));
+    }
+    flock(&file, FlockOperation::NonBlockingLockExclusive)?;
+    Ok(file)
+}
+
+fn remove_stale_artifacts(socket_path: &Path, pid_path: &Path) -> io::Result<()> {
+    let socket = match socket_metadata(socket_path) {
+        Ok(metadata) => Some(AgentArtifact::new(socket_path.to_path_buf(), &metadata)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    if socket.is_some() {
+        match probe_owned_socket(socket_path) {
+            Ok(()) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    "agent socket is in use",
+                ))
+            }
+            Err(error) if missing_or_stale(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    match fs::symlink_metadata(pid_path) {
+        Ok(metadata) if checked_owner_file(&metadata) => fs::remove_file(pid_path)?,
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "unsafe agent PID file",
+            ))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    if socket.as_ref().is_some_and(AgentArtifact::still_owned) {
+        fs::remove_file(socket_path)?;
+    }
+    Ok(())
+}
+
+struct OwnedAgentArtifact(AgentArtifact);
+
+impl Drop for OwnedAgentArtifact {
+    fn drop(&mut self) {
+        self.0.cleanup();
+    }
 }
 
 /// Execute the agent command group.
@@ -132,82 +301,45 @@ pub fn run(cmd: AgentCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
 fn run_start(cmd: AgentStartCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
     let socket_path = agent_socket_path(vault_path);
     let pid_path = agent_pid_path(vault_path);
-
-    if !cmd.foreground && is_agent_running(vault_path) {
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "status": "already_running",
-                    "socket": socket_path.display().to_string(),
-                }))?
-            );
-        } else {
-            println!("Agent is already running.");
-            println!("Socket: {}", socket_path.display());
-        }
-        return Ok(());
-    }
-
-    // Remove stale socket if present
-    if socket_path.exists() {
-        std::fs::remove_file(&socket_path)?;
-    }
-
     if cmd.foreground {
-        // Run in foreground using tokio
+        // Set owner-only permissions before creating the socket or runtime threads.
+        let private = Mode::from_bits_truncate(0o177);
+        umask(umask(private) | private);
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(run_agent_foreground(
-            socket_path.clone(),
-            pid_path,
-            vault_path.to_string(),
-            json,
-        ))?;
+        return rt.block_on(run_agent_foreground(socket_path, pid_path));
+    }
+
+    let launched = ensure_background(vault_path)?;
+    let pid = read_agent_pid(&pid_path);
+    let status = if launched {
+        "started"
     } else {
-        // Spawn ourselves with --foreground for daemonization
-        let exe = std::env::current_exe()?;
-        let child = std::process::Command::new(exe)
-            .arg("--vault-path")
-            .arg(vault_path)
-            .arg("agent")
-            .arg("start")
-            .arg("--foreground")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
-
-        let pid = child.id();
-        std::fs::write(&pid_path, pid.to_string())?;
-
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "status": "started",
-                    "pid": pid,
-                    "socket": socket_path.display().to_string(),
-                }))?
-            );
-        } else {
-            println!("Agent started (PID {pid}).");
-            println!("Socket: {}", socket_path.display());
-            println!();
+        "already_running"
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": status,
+                "pid": pid,
+                "socket": socket_path,
+            }))?
+        );
+    } else {
+        if launched {
+            println!("Agent started (PID {}).", pid.unwrap_or(0));
             println!("To use, run:");
             println!("  eval \"$(padlock agent shell-env)\"");
+        } else {
+            println!("Agent is already running.");
         }
+        println!("Socket: {}", socket_path.display());
     }
-
     Ok(())
 }
 
 /// Run the agent in the foreground (async).
-async fn run_agent_foreground(
-    socket_path: PathBuf,
-    pid_path: PathBuf,
-    _vault_path: String,
-    _json: bool,
-) -> anyhow::Result<()> {
+async fn run_agent_foreground(socket_path: PathBuf, pid_path: PathBuf) -> anyhow::Result<()> {
     use tokio::net::UnixListener;
 
     // Create parent directory
@@ -215,17 +347,23 @@ async fn run_agent_foreground(
         std::fs::create_dir_all(parent)?;
     }
 
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let _lock = take_agent_lock(&socket_path)?;
+    remove_stale_artifacts(&socket_path, &pid_path)?;
     let listener = UnixListener::bind(&socket_path)?;
+    let _socket = OwnedAgentArtifact(AgentArtifact::new(
+        socket_path.clone(),
+        &fs::symlink_metadata(&socket_path)?,
+    ));
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))?;
 
-    // Set socket permissions to 0o600
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
-    }
-
-    // Write PID file
-    std::fs::write(&pid_path, std::process::id().to_string())?;
+    let mut pid_file = File::from(rustix::fs::open(
+        &pid_path,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )?);
+    let _pid = OwnedAgentArtifact(AgentArtifact::new(pid_path, &pid_file.metadata()?));
+    write!(pid_file, "{}", std::process::id())?;
 
     // Create session store for caching vault keys
     let session_store = Arc::new(SessionStore::new());
@@ -236,16 +374,14 @@ async fn run_agent_foreground(
 
     eprintln!("Padlock SSH agent listening on {}", socket_path.display());
 
-    // Set up graceful shutdown
-    let socket_path_clone = socket_path.clone();
-    let pid_path_clone = pid_path.clone();
+    let shutdown = Arc::new(Notify::new());
 
     // Session sweep timer (60s interval)
     let sweep_store = session_store.clone();
     let mut sweep_interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
 
     tokio::select! {
-        result = accept_loop(listener, handler) => {
+        result = accept_loop(listener, handler, shutdown.clone()) => {
             if let Err(e) = result {
                 eprintln!("Agent error: {e}");
             }
@@ -256,15 +392,11 @@ async fn run_agent_foreground(
                 let _ = sweep_store.sweep_expired();
             }
         } => {}
-        _ = tokio::signal::ctrl_c() => {
-            eprintln!("Shutting down agent...");
-            let _ = session_store.destroy_all_sessions();
-        }
+        _ = interrupt.recv() => {}
+        () = shutdown.notified() => {}
     }
 
-    // Cleanup
-    let _ = std::fs::remove_file(&socket_path_clone);
-    let _ = std::fs::remove_file(&pid_path_clone);
+    let _ = session_store.destroy_all_sessions();
 
     Ok(())
 }
@@ -273,12 +405,14 @@ async fn run_agent_foreground(
 async fn accept_loop(
     listener: tokio::net::UnixListener,
     handler: std::sync::Arc<std::sync::Mutex<AgentHandler>>,
+    shutdown: Arc<Notify>,
 ) -> anyhow::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     loop {
         let (mut stream, _) = listener.accept().await?;
         let handler = handler.clone();
+        let shutdown = shutdown.clone();
 
         tokio::spawn(async move {
             loop {
@@ -301,6 +435,21 @@ async fn accept_loop(
 
                 // Parse and handle
                 let response = match parse_message(&msg_buf) {
+                    Ok(AgentMessage::Extension { name, payload })
+                        if name == SESSION_EXTENSION_NAME && payload.as_bytes() == STOP_PAYLOAD =>
+                    {
+                        if stream
+                            .peer_cred()
+                            .is_ok_and(|peer| peer.uid() == geteuid().as_raw())
+                            && stream
+                                .write_all(&serialize_response(&AgentResponse::Success))
+                                .await
+                                .is_ok()
+                        {
+                            shutdown.notify_one();
+                        }
+                        break;
+                    }
                     Ok(msg) => {
                         let h = handler.lock().unwrap();
                         h.handle_message(&msg)
@@ -320,65 +469,69 @@ async fn accept_loop(
 
 /// Stop the running agent.
 fn run_stop(vault_path: &str, json: bool) -> anyhow::Result<()> {
-    let pid_path = agent_pid_path(vault_path);
-    let socket_path = agent_socket_path(vault_path);
-
-    if !pid_path.exists() {
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "status": "not_running",
-                }))?
-            );
-        } else {
-            println!("Agent is not running.");
-        }
-        return Ok(());
-    }
-
-    let pid_str = std::fs::read_to_string(&pid_path)?;
-    if let Ok(pid) = pid_str.trim().parse::<u32>() {
-        // Send SIGTERM using the kill command (safe, no unsafe blocks)
-        let _ = std::process::Command::new("kill")
-            .arg("-TERM")
-            .arg(pid.to_string())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
-
-    // Clean up files
-    let _ = std::fs::remove_file(&pid_path);
-    let _ = std::fs::remove_file(&socket_path);
-
+    let socket = agent_socket_path(vault_path);
+    let status = if stop_owned_agent(&socket)? {
+        "stopped"
+    } else {
+        "not_running"
+    };
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "status": "stopped",
-            }))?
+            serde_json::to_string_pretty(&serde_json::json!({"status": status}))?
         );
-    } else {
+    } else if status == "stopped" {
         println!("Agent stopped.");
+    } else {
+        println!("Agent is not running.");
     }
-
     Ok(())
+}
+
+fn stop_owned_agent(path: &Path) -> anyhow::Result<bool> {
+    let metadata = match socket_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if missing_or_stale(&error) => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let artifact = AgentArtifact::new(path.to_path_buf(), &metadata);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        tokio::time::timeout(AGENT_READY_TIMEOUT, async {
+            let mut stream = match tokio::net::UnixStream::connect(path).await {
+                Ok(stream) => stream,
+                Err(error) if missing_or_stale(&error) => return Ok(false),
+                Err(error) => return Err(error.into()),
+            };
+            if stream.peer_cred()?.uid() != geteuid().as_raw() || !artifact.still_owned() {
+                anyhow::bail!("agent socket identity changed");
+            }
+            stream
+                .write_all(&build_extension_message(STOP_PAYLOAD))
+                .await?;
+            let mut response = [0; 5];
+            stream.read_exact(&mut response).await?;
+            if response.as_slice() != serialize_response(&AgentResponse::Success) {
+                anyhow::bail!("agent did not acknowledge shutdown");
+            }
+            while artifact.still_owned() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Ok(true)
+        })
+        .await?
+    })
 }
 
 /// Show agent status.
 fn run_status(vault_path: &str, json: bool) -> anyhow::Result<()> {
     let socket_path = agent_socket_path(vault_path);
     let pid_path = agent_pid_path(vault_path);
-    let running = is_agent_running(vault_path);
-
-    let pid = if pid_path.exists() {
-        std::fs::read_to_string(&pid_path)
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
-    } else {
-        None
-    };
+    let running = probe_owned_socket(&socket_path).is_ok();
+    let pid = read_agent_pid(&pid_path);
 
     if json {
         println!(

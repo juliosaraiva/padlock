@@ -399,53 +399,7 @@ pub fn destroy_daemon_session(vault_path: &str, token: Option<&[u8; SESSION_TOKE
 ///
 /// Returns `true` if the daemon is running (or was started successfully).
 pub(crate) fn ensure_daemon_running(vault_path: &str) -> bool {
-    let socket = agent_socket_path_for_session(vault_path);
-
-    // Check if socket exists and is connectable
-    if socket.exists() {
-        if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
-            return true;
-        }
-        // Stale socket — remove it
-        let _ = std::fs::remove_file(&socket);
-    }
-
-    // Auto-start the daemon as a background process
-    let Ok(exe) = std::env::current_exe() else {
-        return false;
-    };
-
-    // Remove stale PID file before spawning to prevent the child
-    // from detecting itself via is_agent_running()
-    let pid_path = padlock_dir(vault_path).join("agent.pid");
-    let _ = std::fs::remove_file(&pid_path);
-
-    let child = std::process::Command::new(&exe)
-        .arg("--vault-path")
-        .arg(vault_path)
-        .arg("agent")
-        .arg("start")
-        .arg("--foreground")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-
-    if let Ok(_child) = child {
-        // Do NOT write PID file here — the child writes it in run_agent_foreground()
-        // after binding the socket. Writing it here causes a race where the child
-        // reads its own PID and exits thinking an agent is already running.
-
-        // Poll for socket existence with 100ms intervals, max 3 seconds
-        for _ in 0..30 {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            if socket.exists() && std::os::unix::net::UnixStream::connect(&socket).is_ok() {
-                return true;
-            }
-        }
-    }
-
-    false
+    agent::ensure_background(vault_path).is_ok()
 }
 
 /// Open a vault, trying session cache first, then falling back to passphrase.
