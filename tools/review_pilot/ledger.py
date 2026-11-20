@@ -225,6 +225,61 @@ def canonical_findings(review: Review) -> dict:
     return by_cause
 
 
+SCHEMA_VERSION = 1
+
+ROUNDS_DDL = """
+CREATE TABLE rounds (
+    pr INTEGER NOT NULL,
+    round INTEGER NOT NULL CHECK (round BETWEEN 1 AND 3),
+    head TEXT NOT NULL,
+    package TEXT NOT NULL,
+    outcomes TEXT NOT NULL,
+    PRIMARY KEY (pr, round),
+    UNIQUE (pr, head)
+)
+"""
+API_ATTEMPTS_DDL = """
+CREATE TABLE api_attempts (
+    pr INTEGER NOT NULL,
+    head TEXT NOT NULL,
+    ceiling_microusd INTEGER NOT NULL CHECK (ceiling_microusd > 0),
+    package TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    PRIMARY KEY (pr, head)
+)
+"""
+FINDINGS_DDL = """
+CREATE TABLE findings (
+    pr INTEGER NOT NULL,
+    root_cause TEXT NOT NULL,
+    reviewer TEXT NOT NULL,
+    latest_round INTEGER NOT NULL,
+    finding TEXT NOT NULL,
+    PRIMARY KEY (pr, root_cause, reviewer)
+)
+"""
+LEGACY_ATTEMPTS_DDL = API_ATTEMPTS_DDL.replace(
+    "    package TEXT NOT NULL,\n    request_digest TEXT NOT NULL,\n    attempt_id TEXT NOT NULL,\n",
+    "",
+)
+VERSIONED_ATTEMPTS_DDL = API_ATTEMPTS_DDL.replace(
+    "    package TEXT NOT NULL,\n    request_digest TEXT NOT NULL,\n    attempt_id TEXT NOT NULL,",
+    """    package TEXT,
+    request_digest TEXT,
+    attempt_id TEXT,
+    state TEXT NOT NULL,
+    CHECK (
+        (state = 'legacy_spent' AND package IS NULL AND request_digest IS NULL AND attempt_id IS NULL)
+        OR (state = 'reserved' AND package IS NOT NULL AND request_digest IS NOT NULL AND attempt_id IS NOT NULL)
+    ),""",
+)
+
+
+def schema_signature(statements) -> set[str]:
+    return {" ".join(statement.split()) for statement in statements}
+
+
 class Ledger:
     """One ledger per repository, under an operator-controlled stable directory.
 
@@ -253,35 +308,65 @@ class Ledger:
         finally:
             os.close(fd)
 
-        with self.connect() as db:
-            db.executescript("""
-                CREATE TABLE IF NOT EXISTS rounds (
-                    pr INTEGER NOT NULL,
-                    round INTEGER NOT NULL CHECK (round BETWEEN 1 AND 3),
-                    head TEXT NOT NULL,
-                    package TEXT NOT NULL,
-                    outcomes TEXT NOT NULL,
-                    PRIMARY KEY (pr, round),
-                    UNIQUE (pr, head)
-                );
-                CREATE TABLE IF NOT EXISTS api_attempts (
-                    pr INTEGER NOT NULL,
-                    head TEXT NOT NULL,
-                    ceiling_microusd INTEGER NOT NULL CHECK (ceiling_microusd > 0),
-                    package TEXT NOT NULL,
-                    request_digest TEXT NOT NULL,
-                    attempt_id TEXT NOT NULL,
-                    PRIMARY KEY (pr, head)
-                );
-                CREATE TABLE IF NOT EXISTS findings (
-                    pr INTEGER NOT NULL,
-                    root_cause TEXT NOT NULL,
-                    reviewer TEXT NOT NULL,
-                    latest_round INTEGER NOT NULL,
-                    finding TEXT NOT NULL,
-                    PRIMARY KEY (pr, root_cause, reviewer)
-                );
+        try:
+            with self.connect() as db, db:
+                db.execute("BEGIN IMMEDIATE")
+                self.prepare_schema(db)
+        except sqlite3.Error as error:
+            raise ValueError(
+                "ledger schema check failed. Preserve this ledger and recover it before running reviews"
+            ) from error
+
+    def prepare_schema(self, db) -> None:
+        version, = db.execute("PRAGMA user_version").fetchone()
+        if db.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
+            raise ValueError("ledger integrity check failed. Preserve the ledger for recovery")
+        actual = schema_signature(
+            sql for (sql,) in db.execute("SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL")
+        )
+        history = (ROUNDS_DDL, FINDINGS_DDL)
+        current = schema_signature((*history, VERSIONED_ATTEMPTS_DDL))
+        if version == SCHEMA_VERSION and actual == current:
+            return
+
+        offline = schema_signature(history)
+        legacy = schema_signature((*history, LEGACY_ATTEMPTS_DDL))
+        unversioned = schema_signature((*history, API_ATTEMPTS_DDL))
+        if version != 0 or actual not in (set(), offline, legacy, unversioned):
+            raise ValueError(
+                "unsupported ledger schema. Preserve the existing ledger. "
+                "Use a fresh ledger only for PRs with no prior attempts"
+            )
+
+        if not actual:
+            for ddl in history:
+                db.execute(ddl)
+        if actual in (legacy, unversioned):
+            db.execute("ALTER TABLE api_attempts RENAME TO previous_attempts")
+        db.execute(VERSIONED_ATTEMPTS_DDL)
+        if actual == legacy:
+            db.execute("""
+                INSERT INTO api_attempts (pr, head, ceiling_microusd, state)
+                SELECT pr, head, ceiling_microusd, 'legacy_spent' FROM previous_attempts
             """)
+        elif actual == unversioned:
+            db.execute("""
+                INSERT INTO api_attempts
+                SELECT pr, head, ceiling_microusd, package, request_digest, attempt_id, 'reserved'
+                FROM previous_attempts
+            """)
+        if actual in (legacy, unversioned):
+            columns = "pr, head, ceiling_microusd"
+            if actual == unversioned:
+                columns += ", package, request_digest, attempt_id"
+            before = f"SELECT {columns} FROM previous_attempts"
+            after = f"SELECT {columns} FROM api_attempts"
+            if any(db.execute(query).fetchone() for query in (
+                f"{before} EXCEPT {after}", f"{after} EXCEPT {before}",
+            )):
+                raise ValueError("ledger migration did not preserve all reservations")
+            db.execute("DROP TABLE previous_attempts")
+        db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def check_path(self) -> None:
         for path, identity, expected_type in (
@@ -331,7 +416,7 @@ class Ledger:
             if spent + ceiling > budget:
                 raise ValueError("PR cost cap reached")
             db.execute(
-                "INSERT INTO api_attempts VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO api_attempts VALUES (?, ?, ?, ?, ?, ?, 'reserved')",
                 (package.pr, package.head, ceiling, snapshot, request_digest, attempt_id),
             )
         return attempt_id
@@ -365,13 +450,15 @@ class Ledger:
         with self.connect() as db, db:
             db.execute("BEGIN IMMEDIATE")
             reservation = db.execute(
-                "SELECT package, attempt_id, request_digest FROM api_attempts WHERE pr = ? AND head = ?",
+                "SELECT package, attempt_id, request_digest, state FROM api_attempts WHERE pr = ? AND head = ?",
                 (package.pr, package.head),
             ).fetchone()
             if reservation is None:
                 if api_attempt is not None:
                     raise ValueError("missing API reservation")
-            elif api_attempt is None or reservation != (serialized, *api_attempt):
+            elif reservation[3] == "legacy_spent":
+                raise ValueError("legacy API reservation is spent and cannot finalize")
+            elif api_attempt is None or reservation[:3] != (serialized, *api_attempt):
                 raise ValueError("API finalization does not match reserved attempt and package")
             prior = db.execute(
                 "SELECT round, package, outcomes FROM rounds WHERE pr = ? AND head = ?",
