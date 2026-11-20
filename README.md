@@ -23,7 +23,7 @@ Padlock uses XChaCha20-Poly1305 for authenticated encryption, Argon2id for key d
 - **Password generation** -- configurable length and character sets with strength estimation
 - **TOTP code generation** -- RFC 6238 time-based one-time passwords
 - **Secret injection** -- `padlock exec VAR=entry -- cmd` injects secrets as environment variables
-- **Tamper-evident audit log** -- tracks all vault operations
+- **Audit log reader** — displays unsigned JSON Lines events
 - **JSON output mode** -- `--json` flag on all commands for scripting
 - **Shell completions** -- bash, zsh, fish
 
@@ -211,7 +211,7 @@ Available keys: `session.duration`, `session.max_sessions`, `session.auto_sessio
 - **`mlock`** for key material memory pages
 - **Constant-time comparisons** via `subtle::ConstantTimeEq`
 - **0600 file permissions** on vault, socket, and session token
-- **Tamper-evident audit log** (HMAC chain)
+- **Planned audit integrity** — authenticated log records and a trusted checkpoint
 - **`#![forbid(unsafe_code)]`** in the CLI crate
 
 See [docs/SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md) for the full security design.

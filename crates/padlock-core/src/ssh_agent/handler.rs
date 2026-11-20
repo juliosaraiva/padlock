@@ -180,7 +180,7 @@ impl AgentHandler {
         };
 
         // Validate vault_id
-        let vault_id: [u8; 16] = match req.vault_id.try_into() {
+        let vault_id: [u8; 16] = match req.vault_id.as_slice().try_into() {
             Ok(v) => v,
             Err(_) => return AgentResponse::Failure,
         };

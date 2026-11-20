@@ -36,7 +36,7 @@ pub fn create_entry(
     }
 
     let mut entry = Entry::new(name.clone(), data);
-    tags.clone_into(&mut entry.tags);
+    entry.tags = tags;
 
     // Serialize and encrypt
     let serialized = serialize_entry(&entry)?;
@@ -59,12 +59,9 @@ pub fn create_entry(
             modified_at: now,
             deleted: false,
             title: name,
-            tags: tags.clone(),
+            tags: Vec::new(),
         },
     );
-
-    // Maintain tag index
-    index.add_tags(uuid, &tags);
 
     Ok(entry)
 }
@@ -90,15 +87,12 @@ pub fn read_entry(vault: &Vault, id: &EntryId) -> crate::error::Result<Entry> {
 
     let offset =
         usize::try_from(meta.entry_offset).map_err(|_| Error::Vault(VaultError::CorruptedData))?;
-    let length = meta.entry_length as usize;
-    let blob = vault.entries_blob();
-
-    if offset + length > blob.len() {
-        return Err(Error::Vault(VaultError::CorruptedData));
-    }
-
-    let encrypted = &blob[offset..offset + length];
-    let decrypted = crate::vault::entries::decrypt_entry(encrypted, kek)?;
+    let encrypted = vault
+        .entries_blob()
+        .get(offset..)
+        .and_then(|bytes| bytes.get(..meta.entry_length as usize))
+        .ok_or(Error::Vault(VaultError::CorruptedData))?;
+    let decrypted = zeroize::Zeroizing::new(crate::vault::entries::decrypt_entry(encrypted, kek)?);
     deserialize_entry(&decrypted)
 }
 
@@ -128,28 +122,13 @@ pub fn update_entry(
     // Append new version to blob in place (old data becomes dead space)
     let (offset, length) = vault.append_to_entries_blob(&encrypted)?;
 
-    // Update index and tag index
+    // Update index
     let uuid = *id.as_bytes();
-    let new_tags = entry.tags.clone();
-
-    let index = vault.index_mut()?;
-
-    // Extract old tags first to avoid borrow conflict
-    let old_tags = index
-        .entries
-        .get(&uuid)
-        .map(|m| m.tags.clone())
-        .unwrap_or_default();
-    index.remove_tags(&uuid, &old_tags);
-
-    if let Some(meta) = index.entries.get_mut(&uuid) {
+    if let Some(meta) = vault.index_mut()?.entries.get_mut(&uuid) {
         meta.entry_offset = offset;
         meta.entry_length = length;
         meta.modified_at = u64::try_from(Timestamp::now().as_epoch_secs()).unwrap_or(0);
-        meta.tags.clone_from(&new_tags);
     }
-
-    index.add_tags(uuid, &new_tags);
 
     Ok(entry)
 }
@@ -176,9 +155,6 @@ pub fn delete_entry(vault: &mut Vault, id: &EntryId) -> crate::error::Result<()>
     meta.deleted = true;
     meta.modified_at = u64::try_from(Timestamp::now().as_epoch_secs()).unwrap_or(0);
 
-    // Remove from tag index
-    let tags = meta.tags.clone();
-    index.remove_tags(&uuid, &tags);
     Ok(())
 }
 
@@ -261,75 +237,22 @@ pub fn search_by_name(vault: &Vault, query: &str) -> crate::error::Result<Vec<En
 
 /// Search entries by tag.
 ///
-/// Uses the tag index for O(1) lookup if available, otherwise falls
-/// back to decrypting entries. Tags are compared case-insensitively
-/// using `eq_ignore_ascii_case` to avoid per-tag allocations.
-///
+/// Tags come from authenticated, encrypted entry records. Older vaults may
+/// contain an incomplete plaintext index, which is ignored.
 /// # Errors
-///
 /// Returns `VaultError::Locked` if the vault is not unlocked.
 pub fn search_by_tag(vault: &Vault, tag: &str) -> crate::error::Result<Vec<Entry>> {
-    let kek = vault.kek()?;
     let tag_lower = tag.to_lowercase();
-
-    // Fast path: use the tag index if available
-    if !vault.index().tag_index.is_empty() {
-        let uuids = match vault.index().tag_index.get(&tag_lower) {
-            Some(ids) => ids.clone(),
-            None => return Ok(Vec::new()),
-        };
-
-        let mut results = Vec::with_capacity(uuids.len());
-        for uuid in &uuids {
-            let meta = vault.index().entries.get(uuid);
-            if let Some(m) = meta {
-                if m.deleted {
-                    continue;
-                }
-                let Ok(offset) = usize::try_from(m.entry_offset) else {
-                    continue;
-                };
-                let length = m.entry_length as usize;
-                let blob = vault.entries_blob();
-                if offset + length <= blob.len() {
-                    let encrypted = &blob[offset..offset + length];
-                    if let Ok(decrypted) = crate::vault::entries::decrypt_entry(encrypted, kek) {
-                        if let Ok(entry) = deserialize_entry(&decrypted) {
-                            results.push(entry);
-                        }
-                    }
-                }
-            }
-        }
-        return Ok(results);
-    }
-
-    // Slow path: decrypt all entries and check tags
-    let mut results = Vec::new();
-    for meta in vault.index().entries.values() {
-        if meta.deleted {
-            continue;
-        }
-        let Ok(offset) = usize::try_from(meta.entry_offset) else {
-            continue;
-        };
-        let length = meta.entry_length as usize;
-        let blob = vault.entries_blob();
-        if offset + length <= blob.len() {
-            let encrypted = &blob[offset..offset + length];
-            if let Ok(decrypted) = crate::vault::entries::decrypt_entry(encrypted, kek) {
-                if let Ok(entry) = deserialize_entry(&decrypted) {
-                    if entry
-                        .tags
-                        .iter()
-                        .any(|t| t.eq_ignore_ascii_case(&tag_lower))
-                    {
-                        results.push(entry);
-                    }
-                }
-            }
-        }
-    }
+    let results = list_entries(vault)?
+        .into_iter()
+        .filter_map(|(id, _)| read_entry(vault, &id).ok())
+        .filter(|entry| {
+            entry
+                .tags
+                .iter()
+                .any(|value| value.to_lowercase() == tag_lower)
+        })
+        .collect();
     Ok(results)
 }
 
@@ -589,6 +512,76 @@ mod tests {
         let results = search_by_tag(&vault, "production").unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "tagged");
+    }
+
+    #[test]
+    fn tag_search_ignores_incomplete_legacy_index_and_keeps_tags_encrypted() {
+        let (mut vault, storage) = test_vault();
+        let tag = "Distinctive-Tag-Über";
+        let data = EntryData::Credential {
+            username: String::new(),
+            password: "secret".to_string(),
+            url: None,
+            notes: None,
+        };
+        let first = create_entry(
+            &mut vault,
+            "first".to_string(),
+            data.clone(),
+            vec![tag.into()],
+        )
+        .unwrap();
+        let second = create_entry(
+            &mut vault,
+            "second".to_string(),
+            data.clone(),
+            vec![tag.into()],
+        )
+        .unwrap();
+        vault.write_to_storage(&storage).unwrap();
+        let mut vault = Vault::open("test", &storage, &KdfParams::testing()).unwrap();
+        let third = create_entry(
+            &mut vault,
+            "third".to_string(),
+            data.clone(),
+            vec![tag.into()],
+        )
+        .unwrap();
+        let index = vault.index_mut().unwrap();
+        let third_uuid = *third.id.as_bytes();
+        index
+            .entries
+            .get_mut(&third_uuid)
+            .unwrap()
+            .tags
+            .push(tag.into());
+        index.tag_index.insert(
+            tag.to_lowercase(),
+            vec![third_uuid, third_uuid, *second.id.as_bytes(), [0; 16]],
+        );
+        update_entry(&mut vault, &first.id, data).unwrap();
+        delete_entry(&mut vault, &second.id).unwrap();
+
+        let assert_matches = |vault: &Vault| {
+            let mut names: Vec<_> = search_by_tag(vault, &tag.to_uppercase())
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect();
+            names.sort();
+            assert_eq!(names, ["first", "third"]);
+        };
+        assert_matches(&vault);
+        vault.write_to_storage(&storage).unwrap();
+        let bytes = storage.read_vault().unwrap();
+        for value in [tag.to_owned(), tag.to_lowercase()] {
+            assert!(!bytes
+                .windows(value.len())
+                .any(|window| window == value.as_bytes()));
+        }
+        let reopened = Vault::open("test", &storage, &KdfParams::testing()).unwrap();
+        assert_eq!(reopened.index().tag_index.len(), 0);
+        assert_matches(&reopened);
     }
 
     #[test]

@@ -194,6 +194,7 @@ pub fn serialize_header(header: &VaultHeader) -> [u8; HEADER_SIZE] {
 ///
 /// Returns `VaultError::InvalidFormat` if the data is too short,
 /// the magic bytes are wrong, or the version is unsupported.
+/// Returns a crypto error for invalid or excessive Argon2 parameters.
 pub fn parse_header(data: &[u8]) -> crate::error::Result<VaultHeader> {
     if data.len() < HEADER_SIZE {
         return Err(Error::Vault(VaultError::InvalidFormat {
@@ -268,6 +269,14 @@ pub fn parse_header(data: &[u8]) -> crate::error::Result<VaultHeader> {
         }));
     }
 
+    if (argon2_memory_kib, argon2_time_cost, argon2_parallelism) != (0, 0, 0) {
+        crate::crypto::kdf::validated_params(
+            argon2_memory_kib,
+            argon2_time_cost,
+            argon2_parallelism,
+        )?;
+    }
+
     Ok(header)
 }
 
@@ -288,8 +297,8 @@ pub struct EntryMetadata {
     pub deleted: bool,
     /// Entry title/name (for index lookups without decryption).
     pub title: String,
-    /// Denormalized tags for index-level search without decryption.
-    #[serde(default)]
+    /// Legacy plaintext tags, accepted on read and omitted on write.
+    #[serde(default, skip_serializing)]
     pub tags: Vec<String>,
 }
 
@@ -301,9 +310,8 @@ pub struct EntryMetadata {
 pub struct VaultIndex {
     /// Map from entry UUID to entry metadata.
     pub entries: HashMap<[u8; 16], EntryMetadata>,
-    /// Reverse index from lowercase tag to entry UUIDs.
-    /// Enables O(1) tag lookup instead of O(n) full-decrypt scan.
-    #[serde(default)]
+    /// Legacy reverse tag index, accepted on read and omitted on write.
+    #[serde(default, skip_serializing)]
     pub tag_index: HashMap<String, Vec<[u8; 16]>>,
 }
 
@@ -487,6 +495,26 @@ mod tests {
         assert_eq!(parsed.argon2_memory_kib, 0);
         assert_eq!(parsed.argon2_time_cost, 0);
         assert_eq!(parsed.argon2_parallelism, 0);
+    }
+
+    #[test]
+    fn former_plaintext_tag_fields_still_decode() {
+        let uuid = [0xAA_u8; 16];
+        let old_tags = vec!["legacy-tag".to_owned()];
+        let old_entry = (uuid, 0_u64, 64_u32, 1_u64, 1_u64, false, "title", &old_tags);
+        let old_index = (
+            HashMap::from([(uuid, old_entry)]),
+            HashMap::from([("legacy-tag", vec![uuid])]),
+        );
+        let bytes = rmp_serde::to_vec(&old_index).unwrap();
+        let parsed = deserialize_index(&bytes).unwrap();
+        assert_eq!(parsed.entries[&uuid].tags, old_tags);
+        assert_eq!(parsed.tag_index["legacy-tag"], [uuid]);
+
+        let rewritten = deserialize_index(&serialize_index(&parsed).unwrap()).unwrap();
+        assert_eq!(rewritten.entries[&uuid].title, "title");
+        assert_eq!(rewritten.entries[&uuid].tags.len(), 0);
+        assert_eq!(rewritten.tag_index.len(), 0);
     }
 
     #[test]

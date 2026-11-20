@@ -465,7 +465,7 @@ pub fn open_vault_with_session(vault_path: &str, no_session: bool) -> anyhow::Re
 
     // Fall back to passphrase prompt
     let passphrase = prompt_passphrase("Passphrase: ")?;
-    let vault = Vault::open(&passphrase, &storage, &KdfParams::production())?;
+    let vault = Vault::open(&passphrase, &storage, &KdfParams::legacy_production())?;
 
     // Try to create a session for next time (respecting config)
     if !no_session {
@@ -515,7 +515,7 @@ pub fn open_vault_mut_with_session(
     }
 
     let passphrase = prompt_passphrase("Passphrase: ")?;
-    let vault = Vault::open(&passphrase, &storage, &KdfParams::production())?;
+    let vault = Vault::open(&passphrase, &storage, &KdfParams::legacy_production())?;
 
     // Try to create a session (respecting config)
     if !no_session {

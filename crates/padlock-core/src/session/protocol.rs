@@ -59,16 +59,16 @@ impl SessionMessageType {
     }
 }
 
-/// Request to create a new session.
-#[derive(Debug, Serialize, Deserialize)]
+/// Request to create a new session over the permission-restricted socket.
+#[derive(Serialize, Deserialize)]
 pub struct CreateSessionRequest {
     /// Algorithm identifier byte.
     pub algorithm: u8,
-    /// KEK encrypted with transit key.
+    /// Raw KEK bytes. Field name is kept for wire compatibility.
     pub encrypted_kek: Vec<u8>,
     /// Nonce for KEK transit encryption.
     pub kek_nonce: Vec<u8>,
-    /// MACKEY encrypted with transit key.
+    /// Raw MACKEY bytes. Field name is kept for wire compatibility.
     pub encrypted_mackey: Vec<u8>,
     /// Nonce for MACKEY transit encryption.
     pub mackey_nonce: Vec<u8>,
@@ -82,6 +82,23 @@ pub struct CreateSessionRequest {
     /// Defaults to 900 (15 minutes) if not present (backward compat).
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
+}
+
+impl std::fmt::Debug for CreateSessionRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CreateSessionRequest")
+            .field("algorithm", &self.algorithm)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for CreateSessionRequest {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.encrypted_kek.zeroize();
+        self.encrypted_mackey.zeroize();
+    }
 }
 
 /// Default idle timeout for backward compatibility with older clients.
@@ -319,11 +336,11 @@ pub fn build_extension_message(session_payload: &[u8]) -> Vec<u8> {
 /// Returns an error if serialization fails.
 pub fn build_create_request(req: &CreateSessionRequest) -> Result<Vec<u8>> {
     let mut payload = vec![PROTOCOL_VERSION, SessionMessageType::Create as u8];
-    let body = rmp_serde::to_vec(req).map_err(|e| {
+    let body = zeroize::Zeroizing::new(rmp_serde::to_vec(req).map_err(|e| {
         Error::Agent(AgentError::ProtocolError(format!(
             "failed to serialize CreateSessionRequest: {e}"
         )))
-    })?;
+    })?);
     payload.extend_from_slice(&body);
     Ok(payload)
 }
