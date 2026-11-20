@@ -28,7 +28,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macro
 
 # Password input
 rpassword = "7.3"
-rustix = { version = "1.1", features = ["termios"] }
+rustix = { version = "1.1", features = ["fs", "termios"] }
+signal-hook = { version = "0.3.18", default-features = false }
 
 # Directory paths
 dirs = "5.0"

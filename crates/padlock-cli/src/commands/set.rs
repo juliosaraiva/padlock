@@ -3,12 +3,18 @@
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{self, IsTerminal, Read, Write};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Args;
 use padlock_core::entries::crud::create_entry;
 use padlock_core::entries::types::EntryData;
+use rustix::fs::{fcntl_getfl, fcntl_setfl, OFlags};
 use rustix::termios::{tcgetattr, tcsetattr, LocalModes, OptionalActions, Termios};
-use zeroize::Zeroizing;
+use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGTSTP};
+use signal_hook::{flag, low_level};
+use zeroize::{Zeroize, Zeroizing};
 
 use super::open_vault_mut_with_session;
 
@@ -72,11 +78,22 @@ pub(crate) fn contains_password_option(args: &[OsString]) -> bool {
 struct HiddenTerminal {
     tty: File,
     original: Termios,
+    forward_signals: Arc<AtomicBool>,
+}
+
+impl HiddenTerminal {
+    fn restore(&self) -> rustix::io::Result<()> {
+        tcsetattr(&self.tty, OptionalActions::Flush, &self.original)?;
+        self.forward_signals.store(true, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 impl Drop for HiddenTerminal {
     fn drop(&mut self) {
-        let _ = tcsetattr(&self.tty, OptionalActions::Flush, &self.original);
+        if !self.forward_signals.load(Ordering::SeqCst) {
+            let _ = self.restore();
+        }
     }
 }
 
@@ -84,45 +101,78 @@ fn prompt_entry_password() -> anyhow::Result<String> {
     let tty = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
     let original = tcgetattr(&tty)?;
     let mut hidden = original.clone();
-    // Retain line editing and the newline delimiter while suppressing echo.
+    // Retain canonical editing and the newline delimiter while suppressing echo.
     hidden
         .local_modes
         .insert(LocalModes::ICANON | LocalModes::ECHONL);
     hidden.local_modes.remove(LocalModes::ECHO);
-    tcsetattr(&tty, OptionalActions::Flush, &hidden)?;
-    let mut terminal = HiddenTerminal { tty, original };
+
+    let forward_signals = Arc::new(AtomicBool::new(true));
+    let pending = Arc::new(AtomicUsize::new(0));
+    for signal in [SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGTSTP] {
+        // Leave default behavior active outside this one CLI prompt.
+        flag::register_conditional_default(signal, Arc::clone(&forward_signals))?;
+        flag::register_usize(signal, Arc::clone(&pending), usize::try_from(signal)?)?;
+    }
+    let mut terminal = HiddenTerminal {
+        tty,
+        original,
+        forward_signals,
+    };
+    terminal.forward_signals.store(false, Ordering::SeqCst);
+    tcsetattr(&terminal.tty, OptionalActions::Flush, &hidden)?;
     terminal.tty.write_all(b"Entry password: ")?;
-    read_entry_password(&mut terminal.tty, true)
+    // Nonblocking reads let the main thread restore the terminal even when a
+    // restarting signal has flushed input and no bytes remain to read.
+    fcntl_setfl(
+        &terminal.tty,
+        fcntl_getfl(&terminal.tty)? | OFlags::NONBLOCK,
+    )?;
+
+    let mut bytes = Zeroizing::new([0; MAX_PASSWORD_BYTES + 2]);
+    let input = loop {
+        if pending.load(Ordering::SeqCst) != 0 {
+            break Ok(0);
+        }
+        match terminal.tty.read(&mut *bytes) {
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            result => break result,
+        }
+    };
+
+    terminal.restore()?;
+    let signal = i32::try_from(pending.load(Ordering::SeqCst))?;
+    if signal != 0 {
+        bytes.zeroize();
+        // Stop only after restoring echo. When resumed, abort this set rather
+        // than accepting a partial password or applying a mutation.
+        low_level::emulate_default_handler(signal)?;
+        anyhow::bail!("entry password prompt interrupted");
+    }
+
+    let bytes = &bytes[..input?];
+    if let Some(line) = bytes.strip_suffix(b"\n") {
+        return decode_password(line);
+    }
+    if bytes.len() > MAX_PASSWORD_BYTES {
+        anyhow::bail!("entry password exceeds {MAX_PASSWORD_BYTES} bytes");
+    }
+    anyhow::bail!("entry password input ended before Enter");
 }
 
-fn read_entry_password(reader: &mut impl Read, terminal_line: bool) -> anyhow::Result<String> {
-    // Bound both paths. Allow one extra byte to distinguish the exact limit
-    // from overflow and a terminal newline to complete a full-length line.
-    let mut bytes = Zeroizing::new(vec![0; MAX_PASSWORD_BYTES + 2]);
+fn read_entry_password(reader: &mut impl Read) -> anyhow::Result<String> {
+    let mut bytes = Zeroizing::new([0; MAX_PASSWORD_BYTES + 1]);
     let mut len = 0;
     while len < bytes.len() {
         match reader.read(&mut bytes[len..]) {
             Ok(0) => break,
-            Ok(count) => {
-                len += count;
-                if terminal_line {
-                    if let Some(line) = bytes[..len].strip_suffix(b"\n") {
-                        return decode_password(line);
-                    }
-                    if len <= MAX_PASSWORD_BYTES {
-                        anyhow::bail!("entry password input ended before Enter");
-                    }
-                }
-            }
+            Ok(count) => len += count,
             Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
             Err(err) => return Err(err.into()),
         }
-        if len > MAX_PASSWORD_BYTES {
-            anyhow::bail!("entry password exceeds 512 bytes");
-        }
-    }
-    if terminal_line {
-        anyhow::bail!("entry password input ended before Enter");
     }
     decode_password(&bytes[..len])
 }
@@ -148,7 +198,7 @@ pub fn run(cmd: SetCmd, vault_path: &str, no_session: bool) -> anyhow::Result<()
             anyhow::bail!("--password-stdin requires redirected input");
         }
         let mut input = File::from(rustix::io::dup(stdin)?);
-        read_entry_password(&mut input, false)?
+        read_entry_password(&mut input)?
     } else {
         prompt_entry_password()?
     });

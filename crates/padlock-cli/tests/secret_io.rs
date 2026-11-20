@@ -2,16 +2,18 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use padlock_core::vault::lifecycle::{KdfParams, Vault};
 use padlock_core::vault::storage::FilesystemBackend;
 use rustix::fs::{fcntl_setfl, OFlags};
 use rustix::io::{fcntl_setfd, FdFlags};
+use rustix::process::{kill_process, waitpid, Pid, Signal, WaitOptions};
 use rustix::pty::{grantpt, openpt, ptsname, unlockpt, OpenptFlags};
+use rustix::termios::{tcgetattr, LocalModes};
 
 const CLI: &str = env!("CARGO_BIN_EXE_padlock");
 const PASSPHRASE: &[u8] = b"test-vault-passphrase\n";
@@ -57,17 +59,29 @@ fn run_cli(
     stdin: Option<&[u8]>,
     exchanges: &[(&[u8], &[u8])],
 ) -> (Output, Vec<u8>) {
+    run_cli_observed(vault, args, stdin, exchanges, |_, _| {})
+}
+
+fn run_cli_observed(
+    vault: &Path,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+    exchanges: &[(&[u8], &[u8])],
+    on_first_input: impl FnOnce(&mut Child, &File),
+) -> (Output, Vec<u8>) {
     let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
     fcntl_setfd(&master, FdFlags::CLOEXEC).unwrap();
     grantpt(&master).unwrap();
     unlockpt(&master).unwrap();
     let name = ptsname(&master, Vec::new()).unwrap().into_string().unwrap();
-    let _slave = rustix::fs::open(
+    let slave = rustix::fs::open(
         name.as_str(),
         OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
         rustix::fs::Mode::empty(),
     )
     .unwrap();
+    let slave = File::from(slave);
+    let original_modes = tcgetattr(&slave).unwrap().local_modes;
     fcntl_setfl(&master, OFlags::NONBLOCK).unwrap();
     let mut master = File::from(master);
     let output_dir = tempfile::tempdir().unwrap();
@@ -96,6 +110,7 @@ fn run_cli(
         child.stdin.take().unwrap().write_all(value).unwrap();
     }
 
+    let mut on_first_input = Some(on_first_input);
     let mut transcript = Vec::new();
     let mut unread = 0;
     let mut exchanges = exchanges.iter().peekable();
@@ -109,6 +124,9 @@ fn run_cli(
             {
                 unread += position + prompt.len();
                 master.write_all(input).unwrap();
+                if let Some(observe) = on_first_input.take() {
+                    observe(&mut child, &slave);
+                }
                 exchanges.next();
             }
         }
@@ -127,6 +145,7 @@ fn run_cli(
         "CLI exited before an expected prompt"
     );
     read_tty(&mut master, &mut transcript);
+    assert_eq!(tcgetattr(&master).unwrap().local_modes, original_modes);
     (
         Output {
             status,
@@ -365,4 +384,64 @@ fn password_like_literal_names_are_preserved() {
         assert!(output.status.success(), "{output:?}");
         assert_eq!(output.stdout, SENTINEL.as_bytes());
     }
+}
+
+#[test]
+fn interrupt_restores_terminal_and_leaves_vault_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = fixture(dir.path());
+    let vault = storage.vault_path();
+    let original = fs::read(vault).unwrap();
+    let partial = format!("{SENTINEL}\x03");
+
+    let (output, transcript) = run_cli(
+        vault,
+        &["set", "interrupt"],
+        None,
+        &[(b"Entry password: ", partial.as_bytes())],
+    );
+    assert_eq!(output.status.signal(), Some(signal_hook::consts::SIGINT));
+    assert_no_echo(&output, &transcript);
+    assert_eq!(fs::read(vault).unwrap(), original);
+}
+
+#[test]
+fn suspend_restores_echo_before_stopping_and_cancels_on_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = fixture(dir.path());
+    let vault = storage.vault_path();
+    let original = fs::read(vault).unwrap();
+    let partial = format!("{SENTINEL}\x1a");
+
+    let (output, transcript) = run_cli_observed(
+        vault,
+        &["set", "suspend"],
+        None,
+        &[(b"Entry password: ", partial.as_bytes())],
+        |child, tty| {
+            let pid = Pid::from_child(child);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some((_, status)) =
+                    waitpid(Some(pid), WaitOptions::UNTRACED | WaitOptions::NOHANG).unwrap()
+                {
+                    assert!(status.stopped(), "expected the CLI to suspend");
+                    let modes = tcgetattr(tty).unwrap().local_modes;
+                    kill_process(pid, Signal::CONT).unwrap();
+                    assert!(modes.contains(LocalModes::ECHO | LocalModes::ICANON));
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("CLI did not suspend");
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        },
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("prompt interrupted"));
+    assert_no_echo(&output, &transcript);
+    assert_eq!(fs::read(vault).unwrap(), original);
 }
