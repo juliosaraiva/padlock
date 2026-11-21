@@ -517,6 +517,35 @@ mod session_ipc_tests {
     use super::*;
 
     #[test]
+    fn create_session_write_boundary_rejects_unsafe_socket() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path().join("fixture.vault");
+        let socket = dir.path().join("agent.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o666)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+
+        // Call the write boundary directly. No daemon readiness probe runs here.
+        let token = create_daemon_session(
+            vault.to_str().unwrap(),
+            &SecretBuf::from_bytes(&[0xD1; 32]),
+            &SecretBuf::from_bytes(&[0xE2; 32]),
+            &[0; 16],
+            SessionDuration::OneHour,
+            900,
+        );
+        assert!(token.is_none());
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "rejected socket must receive no connection or credential bytes"
+        );
+    }
+
+    #[test]
     fn create_request_surfaces_failed_socket_write() {
         let (mut writer, _reader) = std::os::unix::net::UnixStream::pair().unwrap();
         writer.shutdown(std::net::Shutdown::Write).unwrap();
