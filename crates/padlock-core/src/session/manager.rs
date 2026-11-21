@@ -336,6 +336,79 @@ mod tests {
         assert_eq!(&*recovered_mackey, &*mackey);
     }
 
+    fn create_timed_session(store: &SessionStore, idle_timeout: Duration) -> [u8; 32] {
+        let token = store
+            .create_session(
+                &test_kek(),
+                &test_mackey(),
+                &test_vault_id(),
+                SessionDuration::OneHour,
+                idle_timeout,
+                SessionAlgorithm::XChaCha20Poly1305HkdfSha256,
+            )
+            .unwrap();
+        token.as_bytes().try_into().unwrap()
+    }
+
+    #[test]
+    fn resume_renews_idle_without_extending_absolute_expiry() {
+        let store = SessionStore::new();
+        let token = create_timed_session(&store, Duration::from_secs(60));
+        let (id, previous_access, expiry) = {
+            let mut sessions = store.sessions.lock().unwrap();
+            let id = SessionStore::find_by_token(&sessions, &token).unwrap();
+            let session = sessions.get_mut(&id).unwrap();
+            session.last_accessed = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
+            (id, session.last_accessed, session.expires_at)
+        };
+
+        drop(store.resume_session(&token).unwrap());
+        {
+            let mut sessions = store.sessions.lock().unwrap();
+            let session = sessions.get_mut(&id).unwrap();
+            assert!(session.last_accessed > previous_access);
+            assert_eq!(session.expires_at, expiry);
+
+            session.last_accessed = Instant::now();
+            session.expires_at = session
+                .last_accessed
+                .checked_sub(Duration::from_secs(1))
+                .unwrap();
+        }
+        assert!(!store.session_status(&token).unwrap().valid);
+        assert!(matches!(
+            store.resume_session(&token),
+            Err(Error::Session(SessionError::Expired))
+        ));
+        assert!(matches!(
+            store.session_status(&token),
+            Err(Error::Session(SessionError::InvalidSession))
+        ));
+    }
+
+    #[test]
+    fn status_and_sweep_agree_on_idle_expiry_and_live_control() {
+        let store = SessionStore::new();
+        let idle_timeout = Duration::from_secs(60);
+        let expired = create_timed_session(&store, idle_timeout);
+        let live = create_timed_session(&store, idle_timeout);
+        {
+            let mut sessions = store.sessions.lock().unwrap();
+            let id = SessionStore::find_by_token(&sessions, &expired).unwrap();
+            let session = sessions.get_mut(&id).unwrap();
+            session.last_accessed = Instant::now().checked_sub(2 * idle_timeout).unwrap();
+        }
+        assert!(!store.session_status(&expired).unwrap().valid);
+        assert!(store.session_status(&live).unwrap().valid);
+        assert_eq!(store.sweep_expired().unwrap(), 1);
+        assert!(matches!(
+            store.session_status(&expired),
+            Err(Error::Session(SessionError::InvalidSession))
+        ));
+        assert!(store.session_status(&live).unwrap().valid);
+        assert_eq!(store.sweep_expired().unwrap(), 0);
+    }
+
     #[test]
     fn test_resume_increments_use_count() {
         let store = SessionStore::new();
