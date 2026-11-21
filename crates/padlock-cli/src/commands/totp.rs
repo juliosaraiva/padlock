@@ -30,6 +30,9 @@ pub struct TotpGenerateCmd {
 }
 
 /// Execute the totp command.
+///
+/// # Errors
+/// Returns an error if the entry cannot be read or a TOTP code cannot be generated.
 pub fn run(cmd: TotpCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
     match cmd.command {
         TotpSubcommand::Generate(gen) => run_generate(gen, vault_path, json),
@@ -37,6 +40,8 @@ pub fn run(cmd: TotpCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
 }
 
 /// Execute the totp generate subcommand.
+// Keep ownership at the command dispatch boundary.
+#[allow(clippy::needless_pass_by_value)]
 fn run_generate(cmd: TotpGenerateCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
     let vault = open_vault_with_session(vault_path)?;
 

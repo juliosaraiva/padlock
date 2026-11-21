@@ -10,11 +10,20 @@ use super::{prompt_passphrase, resolve_vault_path};
 #[derive(Args)]
 pub struct InitCmd {
     /// Path to the vault file.
-    #[arg(long, env = "PADLOCK_VAULT", default_value = "~/.padlock/vault.padlock")]
+    #[arg(
+        long,
+        env = "PADLOCK_VAULT",
+        default_value = "~/.padlock/vault.padlock"
+    )]
     vault_path: String,
 }
 
 /// Execute the init command.
+///
+/// # Errors
+/// Returns an error if the passphrase cannot be read or the vault cannot be created.
+// Keep ownership at the command dispatch boundary.
+#[allow(clippy::needless_pass_by_value)]
 pub fn run(cmd: InitCmd) -> anyhow::Result<()> {
     let path = resolve_vault_path(&cmd.vault_path);
 

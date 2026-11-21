@@ -9,9 +9,9 @@
 //! [Init] --> Locked --unlock()--> Unlocked --lock()--> Locked
 //! ```
 
+use crate::crypto::hkdf_keys::{derive_kek, derive_mackey};
 use crate::crypto::hmac::{compute_hmac, verify_hmac, HMAC_SIZE};
 use crate::crypto::kdf::{derive_pdk_with_params, generate_argon2_salt};
-use crate::crypto::hkdf_keys::{derive_kek, derive_mackey};
 use crate::crypto::secret_buf::SecretBuf;
 use crate::error::{Error, VaultError};
 use crate::traits::storage::StorageBackend;
@@ -90,6 +90,8 @@ impl Vault {
     /// # Errors
     ///
     /// Returns an error if key derivation or storage write fails.
+    // Preserve existing integer conversion semantics. Bounds changes need separate review.
+    #[allow(clippy::cast_sign_loss)]
     pub fn init(
         passphrase: &str,
         storage: &dyn StorageBackend,
@@ -251,9 +253,7 @@ impl Vault {
     ///
     /// Returns `VaultError::Locked` if the vault is locked.
     pub fn kek(&self) -> crate::error::Result<&SecretBuf> {
-        self.kek
-            .as_ref()
-            .ok_or(Error::Vault(VaultError::Locked))
+        self.kek.as_ref().ok_or(Error::Vault(VaultError::Locked))
     }
 
     /// Get the MACKEY for vault integrity operations.
@@ -262,9 +262,7 @@ impl Vault {
     ///
     /// Returns `VaultError::Locked` if the vault is locked.
     pub fn mackey(&self) -> crate::error::Result<&SecretBuf> {
-        self.mackey
-            .as_ref()
-            .ok_or(Error::Vault(VaultError::Locked))
+        self.mackey.as_ref().ok_or(Error::Vault(VaultError::Locked))
     }
 
     /// Open a vault using pre-derived KEK and MACKEY (from session cache).
@@ -355,6 +353,8 @@ impl Vault {
     ///
     /// Returns `VaultError::Locked` if the vault is locked.
     /// Returns errors if serialization or storage write fails.
+    // Preserve existing integer conversion semantics. Bounds changes need separate review.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub fn write_to_storage(&mut self, storage: &dyn StorageBackend) -> crate::error::Result<()> {
         let mackey = self
             .mackey
@@ -397,6 +397,8 @@ impl Vault {
     /// # Errors
     ///
     /// Returns `VaultError::Locked` if the vault is locked.
+    // Preserve existing integer conversion semantics. Bounds changes need separate review.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn change_passphrase(
         &mut self,
         new_passphrase: &str,
@@ -423,10 +425,7 @@ impl Vault {
         let new_mackey = derive_mackey(&pdk)?;
 
         // Re-encrypt all entries with the new KEK
-        let old_kek = self
-            .kek
-            .as_ref()
-            .ok_or(Error::Vault(VaultError::Locked))?;
+        let old_kek = self.kek.as_ref().ok_or(Error::Vault(VaultError::Locked))?;
 
         if !self.entries_blob.is_empty() {
             let mut new_entries_blob = Vec::new();
@@ -435,7 +434,14 @@ impl Vault {
                 .index
                 .entries
                 .values()
-                .map(|m| (m.uuid, m.entry_offset as usize, m.entry_length as usize, m.deleted))
+                .map(|m| {
+                    (
+                        m.uuid,
+                        m.entry_offset as usize,
+                        m.entry_length as usize,
+                        m.deleted,
+                    )
+                })
                 .collect();
 
             for (uuid, offset, length, deleted) in &entry_info {
@@ -446,10 +452,8 @@ impl Vault {
                     return Err(Error::Vault(VaultError::CorruptedData));
                 }
                 let encrypted_entry = &self.entries_blob[*offset..*offset + *length];
-                let plaintext =
-                    crate::vault::entries::decrypt_entry(encrypted_entry, old_kek)?;
-                let new_encrypted =
-                    crate::vault::entries::encrypt_entry(&plaintext, &new_kek)?;
+                let plaintext = crate::vault::entries::decrypt_entry(encrypted_entry, old_kek)?;
+                let new_encrypted = crate::vault::entries::encrypt_entry(&plaintext, &new_kek)?;
 
                 let new_offset = new_entries_blob.len() as u64;
                 let new_length = new_encrypted.len() as u32;
@@ -476,7 +480,7 @@ impl Vault {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vault::entries::{encrypt_entry, decrypt_entry};
+    use crate::vault::entries::{decrypt_entry, encrypt_entry};
 
     struct InMemStorage {
         data: std::sync::Mutex<Option<Vec<u8>>>,
@@ -570,6 +574,8 @@ mod tests {
         assert!(vault.write_to_storage(&storage).is_err());
     }
 
+    // Preserve existing integer conversion semantics. Bounds changes need separate review.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     #[test]
     fn test_vault_write_and_reopen_preserves_data() {
         let storage = InMemStorage::new();
@@ -602,8 +608,8 @@ mod tests {
         let vault2 = Vault::open("pass", &storage, &params).unwrap();
         assert_eq!(vault2.index().entries.len(), 1);
         let meta = vault2.index().entries.get(&entry_uuid).unwrap();
-        let blob = &vault2.entries_blob()[meta.entry_offset as usize
-            ..meta.entry_offset as usize + meta.entry_length as usize];
+        let blob = &vault2.entries_blob()
+            [meta.entry_offset as usize..meta.entry_offset as usize + meta.entry_length as usize];
         let decrypted = decrypt_entry(blob, vault2.kek().unwrap()).unwrap();
         assert_eq!(decrypted, b"my secret data");
     }
@@ -625,6 +631,8 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // Preserve existing integer conversion semantics. Bounds changes need separate review.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     #[test]
     fn test_vault_change_passphrase() {
         let storage = InMemStorage::new();
@@ -664,8 +672,8 @@ mod tests {
         // New passphrase should work and data is preserved
         let vault2 = Vault::open("new-pass", &storage, &params).unwrap();
         let meta = vault2.index().entries.get(&entry_uuid).unwrap();
-        let blob = &vault2.entries_blob()[meta.entry_offset as usize
-            ..meta.entry_offset as usize + meta.entry_length as usize];
+        let blob = &vault2.entries_blob()
+            [meta.entry_offset as usize..meta.entry_offset as usize + meta.entry_length as usize];
         let decrypted = decrypt_entry(blob, vault2.kek().unwrap()).unwrap();
         assert_eq!(decrypted, b"preserved data");
     }

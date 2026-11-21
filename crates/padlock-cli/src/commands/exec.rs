@@ -13,7 +13,7 @@ use super::open_vault_with_session;
 /// Run a command with secrets injected as environment variables.
 #[derive(Args)]
 pub struct ExecCmd {
-    /// Variable assignments in the form VAR=entry_name.
+    /// Variable assignments in the form `VAR=entry_name`.
     #[arg(required = true, num_args = 1..)]
     assignments: Vec<String>,
 
@@ -23,13 +23,18 @@ pub struct ExecCmd {
 }
 
 /// Execute the exec command.
+///
+/// # Errors
+/// Returns an error if an entry cannot be read or the child process cannot start.
+// Keep ownership at the command dispatch boundary.
+#[allow(clippy::needless_pass_by_value)]
 pub fn run(cmd: ExecCmd, vault_path: &str) -> anyhow::Result<()> {
     // Parse VAR=entry_name pairs
     let mut mappings = Vec::new();
     for assignment in &cmd.assignments {
-        let (var, entry_name) = assignment
-            .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("invalid assignment '{assignment}': expected VAR=entry_name"))?;
+        let (var, entry_name) = assignment.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("invalid assignment '{assignment}': expected VAR=entry_name")
+        })?;
 
         if var.is_empty() {
             anyhow::bail!("empty variable name in assignment '{assignment}'");
@@ -73,13 +78,12 @@ pub fn run(cmd: ExecCmd, vault_path: &str) -> anyhow::Result<()> {
 /// Extract the secret value from an entry as a string.
 fn extract_secret(data: &EntryData, name: &str) -> anyhow::Result<String> {
     match data {
-        EntryData::Credential { password, .. } => Ok(password.clone()),
+        EntryData::Credential { password, .. } | EntryData::Netrc { password, .. } => {
+            Ok(password.clone())
+        }
         EntryData::TOTP { secret, .. } => Ok(secret.clone()),
         EntryData::SSHKey { private_key, .. } => Ok(private_key.clone()),
-        EntryData::Netrc { password, .. } => Ok(password.clone()),
-        EntryData::Binary { data, .. } => {
-            String::from_utf8(data.clone())
-                .map_err(|_| anyhow::anyhow!("entry '{name}' contains non-UTF-8 binary data"))
-        }
+        EntryData::Binary { data, .. } => String::from_utf8(data.clone())
+            .map_err(|_| anyhow::anyhow!("entry '{name}' contains non-UTF-8 binary data")),
     }
 }

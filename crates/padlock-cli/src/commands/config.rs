@@ -47,6 +47,9 @@ pub struct ConfigSetCmd {
 pub struct ConfigListCmd;
 
 /// Execute the config command.
+///
+/// # Errors
+/// Returns an error if the setting is invalid or the configuration cannot be read or saved.
 pub fn run(cmd: ConfigCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
     match cmd.command {
         ConfigSubcommand::Get(get) => run_get(get, vault_path, json),
@@ -121,6 +124,8 @@ const CONFIG_KEYS: &[&str] = &[
     "session.auto_session",
 ];
 
+// Keep ownership at the command dispatch boundary.
+#[allow(clippy::needless_pass_by_value)]
 fn run_get(cmd: ConfigGetCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
     let config = load_config(vault_path)?;
     let value = get_value(&config, &cmd.key)?;
@@ -138,6 +143,8 @@ fn run_get(cmd: ConfigGetCmd, vault_path: &str, json: bool) -> anyhow::Result<()
     Ok(())
 }
 
+// Keep ownership at the command dispatch boundary.
+#[allow(clippy::needless_pass_by_value)]
 fn run_set(cmd: ConfigSetCmd, vault_path: &str) -> anyhow::Result<()> {
     let mut config = load_config(vault_path)?;
     set_value(&mut config, &cmd.key, &cmd.value)?;
@@ -155,7 +162,10 @@ fn run_list(_cmd: ConfigListCmd, vault_path: &str, json: bool) -> anyhow::Result
                 entries.insert((*key).to_string(), serde_json::Value::String(value));
             }
         }
-        println!("{}", serde_json::to_string_pretty(&serde_json::Value::Object(entries))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::Value::Object(entries))?
+        );
     } else {
         for key in CONFIG_KEYS {
             if let Ok(value) = get_value(&config, key) {

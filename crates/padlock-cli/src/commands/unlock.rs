@@ -12,12 +12,18 @@ use super::{prompt_passphrase, resolve_vault_path};
 pub struct UnlockCmd {}
 
 /// Execute the unlock command.
+///
+/// # Errors
+/// Returns an error if the passphrase cannot be read or the vault cannot be unlocked.
 pub fn run(_cmd: UnlockCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
     let path = resolve_vault_path(vault_path);
     let storage = FilesystemBackend::new(path.clone());
 
     if !storage.vault_exists()? {
-        anyhow::bail!("vault not found at {}. Run `padlock init` first.", path.display());
+        anyhow::bail!(
+            "vault not found at {}. Run `padlock init` first.",
+            path.display()
+        );
     }
 
     let passphrase = prompt_passphrase("Passphrase: ")?;

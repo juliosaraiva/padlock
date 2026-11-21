@@ -4,8 +4,8 @@
 //! KDF determinism, and rejection of wrong keys and tampered data.
 
 use padlock_core::crypto::aead::{
-    aead_decrypt, aead_encrypt, generate_dek, generate_nonce, wrap_dek, unwrap_dek,
-    KEY_SIZE, NONCE_SIZE, TAG_SIZE,
+    aead_decrypt, aead_encrypt, generate_dek, generate_nonce, unwrap_dek, wrap_dek, KEY_SIZE,
+    NONCE_SIZE, TAG_SIZE,
 };
 use padlock_core::crypto::hmac::{compute_hmac, verify_hmac, HMAC_SIZE};
 use padlock_core::crypto::kdf::{derive_pdk_for_testing, generate_argon2_salt, SALT_LENGTH};
@@ -33,7 +33,7 @@ fn test_aead_roundtrip_empty_payload() {
     let ciphertext = aead_encrypt(&key, &nonce, &[], b"").unwrap();
     assert_eq!(ciphertext.len(), TAG_SIZE); // only tag, no data
     let plaintext = aead_decrypt(&key, &nonce, &[], &ciphertext).unwrap();
-    assert!(plaintext.is_empty());
+    assert_eq!(plaintext, [] as [u8; 0]);
 }
 
 #[test]

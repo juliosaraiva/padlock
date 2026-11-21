@@ -17,6 +17,11 @@ pub struct RmCmd {
 }
 
 /// Execute the rm command.
+///
+/// # Errors
+/// Returns an error if the vault or entry cannot be read, removed, or saved.
+// Keep ownership at the command dispatch boundary.
+#[allow(clippy::needless_pass_by_value)]
 pub fn run(cmd: RmCmd, vault_path: &str) -> anyhow::Result<()> {
     let (mut vault, storage) = open_vault_mut_with_session(vault_path)?;
 

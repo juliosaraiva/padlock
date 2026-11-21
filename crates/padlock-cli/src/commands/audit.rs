@@ -26,17 +26,25 @@ pub struct AuditCmd {
 }
 
 /// Run the audit command.
+///
+/// # Errors
+/// Returns an error if a filter is invalid or the audit log cannot be opened or read.
+///
+/// # Panics
+/// Panics if the vault path has no parent and the home directory is unavailable.
+// Keep ownership at the command dispatch boundary.
+#[allow(clippy::needless_pass_by_value)]
 pub fn run(cmd: AuditCmd, vault_path: &str, fmt: &OutputFormatter) -> anyhow::Result<()> {
-    let padlock_dir = super::resolve_vault_path(vault_path)
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| dirs::home_dir().unwrap().join(".padlock"));
+    let padlock_dir = super::resolve_vault_path(vault_path).parent().map_or_else(
+        || dirs::home_dir().unwrap().join(".padlock"),
+        std::path::Path::to_path_buf,
+    );
 
     let audit_path = padlock_dir.join("audit.jsonl");
     let log = JsonLinesAuditLog::new(&audit_path)?;
     let events = log.read_events()?;
 
-    let cutoff = parse_since(&cmd.since)?;
+    let cutoff = parse_since(cmd.since.as_deref())?;
     let action_filter = cmd.action.as_deref().map(parse_action).transpose()?;
 
     let filtered: Vec<&AuditEvent> = events
@@ -93,35 +101,33 @@ pub fn run(cmd: AuditCmd, vault_path: &str, fmt: &OutputFormatter) -> anyhow::Re
             padlock_core::types::AuditResult::Failure => "FAIL",
         };
         let resource = event.resource_id.as_deref().unwrap_or("-");
-        fmt.table_row(&[&ts, &action, result, resource]);
+        fmt.table_row(&[&ts, action, result, resource]);
     }
 
     Ok(())
 }
 
 /// Parse a duration string like "1h", "24h", "7d" into an epoch-seconds cutoff.
-fn parse_since(since: &Option<String>) -> anyhow::Result<Option<i64>> {
-    let since = match since {
-        Some(s) => s,
-        None => return Ok(None),
+fn parse_since(since: Option<&str>) -> anyhow::Result<Option<i64>> {
+    let Some(since) = since else {
+        return Ok(None);
     };
 
     let (num_str, multiplier) = if let Some(n) = since.strip_suffix('d') {
-        (n, 86400i64)
+        (n, 86_400i64)
     } else if let Some(n) = since.strip_suffix('h') {
-        (n, 3600i64)
+        (n, 3_600i64)
     } else if let Some(n) = since.strip_suffix('m') {
         (n, 60i64)
     } else {
         return Err(anyhow::anyhow!(
-            "invalid duration format '{}': expected e.g. '1h', '24h', '7d'",
-            since
+            "invalid duration format '{since}': expected e.g. '1h', '24h', '7d'"
         ));
     };
 
     let num: i64 = num_str
         .parse()
-        .map_err(|_| anyhow::anyhow!("invalid number in duration '{}'", since))?;
+        .map_err(|_| anyhow::anyhow!("invalid number in duration '{since}'"))?;
 
     let now = chrono::Utc::now().timestamp();
     Ok(Some(now - num * multiplier))
@@ -147,11 +153,10 @@ fn parse_action(s: &str) -> anyhow::Result<AuditAction> {
         "session-expired" => Ok(AuditAction::SessionExpired),
         "session-invalid-token" => Ok(AuditAction::SessionInvalidToken),
         _ => Err(anyhow::anyhow!(
-            "unknown audit action '{}'. Valid actions: vault-init, vault-unlock, vault-lock, \
+            "unknown audit action '{s}'. Valid actions: vault-init, vault-unlock, vault-lock, \
              vault-passphrase-change, entry-create, entry-read, entry-update, entry-delete, \
              ssh-sign, ssh-list-keys, git-sign, session-create, session-resume, \
-             session-destroy, session-expired, session-invalid-token",
-            s
+             session-destroy, session-expired, session-invalid-token"
         )),
     }
 }
@@ -193,26 +198,26 @@ mod tests {
 
     #[test]
     fn test_parse_since_hours() {
-        let result = parse_since(&Some("24h".to_string())).unwrap();
+        let result = parse_since(Some("24h")).unwrap();
         assert!(result.is_some());
         let cutoff = result.unwrap();
         let now = chrono::Utc::now().timestamp();
         // Should be approximately 24 hours ago
-        assert!((now - cutoff - 86400).abs() < 2);
+        assert!((now - cutoff - 86_400).abs() < 2);
     }
 
     #[test]
     fn test_parse_since_days() {
-        let result = parse_since(&Some("7d".to_string())).unwrap();
+        let result = parse_since(Some("7d")).unwrap();
         assert!(result.is_some());
         let cutoff = result.unwrap();
         let now = chrono::Utc::now().timestamp();
-        assert!((now - cutoff - 604800).abs() < 2);
+        assert!((now - cutoff - 604_800).abs() < 2);
     }
 
     #[test]
     fn test_parse_since_minutes() {
-        let result = parse_since(&Some("30m".to_string())).unwrap();
+        let result = parse_since(Some("30m")).unwrap();
         assert!(result.is_some());
         let cutoff = result.unwrap();
         let now = chrono::Utc::now().timestamp();
@@ -221,13 +226,13 @@ mod tests {
 
     #[test]
     fn test_parse_since_none() {
-        let result = parse_since(&None).unwrap();
+        let result = parse_since(None).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn test_parse_since_invalid() {
-        let result = parse_since(&Some("abc".to_string()));
+        let result = parse_since(Some("abc"));
         assert!(result.is_err());
     }
 

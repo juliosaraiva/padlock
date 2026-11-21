@@ -3,11 +3,11 @@
 //! Tests init, open, lock, unlock, passphrase change, and
 //! data persistence across vault reopen cycles.
 
-use padlock_core::vault::lifecycle::{KdfParams, Vault, VaultState};
-use padlock_core::vault::storage::FilesystemBackend;
+use padlock_core::types::Timestamp;
 use padlock_core::vault::entries::{decrypt_entry, encrypt_entry};
 use padlock_core::vault::format::EntryMetadata;
-use padlock_core::types::Timestamp;
+use padlock_core::vault::lifecycle::{KdfParams, Vault, VaultState};
+use padlock_core::vault::storage::FilesystemBackend;
 use tempfile::TempDir;
 
 fn test_params() -> KdfParams {
@@ -136,6 +136,8 @@ fn test_vault_open_preserves_uuid() {
 
 // --- Data persistence across reopen ---
 
+// Preserve existing integer conversion semantics. Bounds changes need separate review.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 #[test]
 fn test_vault_reopen_preserves_entry_data() {
     let dir = TempDir::new().unwrap();
@@ -177,6 +179,8 @@ fn test_vault_reopen_preserves_entry_data() {
     assert_eq!(decrypted, plaintext);
 }
 
+// Preserve existing integer conversion semantics. Bounds changes need separate review.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 #[test]
 fn test_vault_reopen_preserves_multiple_entries() {
     let dir = TempDir::new().unwrap();
@@ -232,6 +236,8 @@ fn test_vault_reopen_preserves_multiple_entries() {
 
 // --- Change passphrase ---
 
+// Preserve existing integer conversion semantics. Bounds changes need separate review.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 #[test]
 fn test_vault_change_passphrase_new_passphrase_works() {
     let dir = TempDir::new().unwrap();

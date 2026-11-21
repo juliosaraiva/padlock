@@ -17,7 +17,7 @@
 //! - **`audit`**: Tamper-evident audit log
 //! - **`generate`**: Password, TOTP secret, and SSH key generation
 //! - **`traits`**: Abstraction boundaries (storage, keyring, user interaction)
-//! - **`types`**: Shared domain types (Entry, SecretBuf, identifiers)
+//! - **`types`**: Shared domain types (Entry, `SecretBuf`, identifiers)
 //!
 //! # Security Priority
 //!

@@ -64,7 +64,7 @@ pub enum AgentMessage {
 pub enum AgentResponse {
     /// List of available identities.
     IdentitiesAnswer {
-        /// List of (public_key_blob, comment) pairs.
+        /// List of (`public_key_blob`, comment) pairs.
         keys: Vec<(Vec<u8>, String)>,
     },
     /// Signature response.
@@ -92,7 +92,7 @@ fn read_u32(data: &[u8]) -> Option<u32> {
 }
 
 /// Read a length-prefixed string/blob from a byte slice.
-/// Returns (value, bytes_consumed).
+/// Returns (value, `bytes_consumed`).
 fn read_string(data: &[u8]) -> Option<(Vec<u8>, usize)> {
     let len = read_u32(data)? as usize;
     if data.len() < 4 + len {
@@ -204,6 +204,8 @@ pub fn parse_message(data: &[u8]) -> crate::error::Result<AgentMessage> {
 /// Serialize an SSH agent response to wire bytes.
 ///
 /// Returns the complete message including the 4-byte length prefix.
+// Preserve existing integer conversion semantics. Bounds changes need separate review.
+#[allow(clippy::cast_possible_truncation)]
 #[must_use]
 pub fn serialize_response(response: &AgentResponse) -> Vec<u8> {
     let mut payload = Vec::new();
@@ -293,7 +295,9 @@ mod tests {
         let msg = parse_message(&data).unwrap();
         match msg {
             AgentMessage::SignRequest {
-                key_blob, data: sign_data, flags,
+                key_blob,
+                data: sign_data,
+                flags,
             } => {
                 assert_eq!(key_blob, b"key1");
                 assert_eq!(sign_data, b"hello");
@@ -316,9 +320,7 @@ mod tests {
     #[test]
     fn test_serialize_identities_answer_with_keys() {
         let response = AgentResponse::IdentitiesAnswer {
-            keys: vec![
-                (b"pubkey1".to_vec(), "comment1".to_string()),
-            ],
+            keys: vec![(b"pubkey1".to_vec(), "comment1".to_string())],
         };
         let bytes = serialize_response(&response);
         assert!(bytes.len() > 9);

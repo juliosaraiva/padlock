@@ -66,19 +66,19 @@ pub struct AgentListCmd {}
 /// Get the agent socket path from the vault path.
 fn agent_socket_path(vault_path: &str) -> PathBuf {
     let vault = resolve_vault_path(vault_path);
-    vault
-        .parent()
-        .map(|p| p.join("agent.sock"))
-        .unwrap_or_else(|| PathBuf::from("/tmp/padlock-agent.sock"))
+    vault.parent().map_or_else(
+        || PathBuf::from("/tmp/padlock-agent.sock"),
+        |p| p.join("agent.sock"),
+    )
 }
 
 /// Get the agent PID file path.
 fn agent_pid_path(vault_path: &str) -> PathBuf {
     let vault = resolve_vault_path(vault_path);
-    vault
-        .parent()
-        .map(|p| p.join("agent.pid"))
-        .unwrap_or_else(|| PathBuf::from("/tmp/padlock-agent.pid"))
+    vault.parent().map_or_else(
+        || PathBuf::from("/tmp/padlock-agent.pid"),
+        |p| p.join("agent.pid"),
+    )
 }
 
 /// Check if the agent is running by checking the PID file and process.
@@ -98,14 +98,16 @@ fn is_agent_running(vault_path: &str) -> bool {
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
+                .is_ok_and(|s| s.success());
         }
     }
     false
 }
 
 /// Execute the agent command group.
+///
+/// # Errors
+/// Returns an error if the agent command cannot read its state, start, or stop.
 pub fn run(cmd: AgentCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
     match cmd.command {
         AgentSubcommand::Start(start) => run_start(start, vault_path, json),
@@ -117,6 +119,8 @@ pub fn run(cmd: AgentCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
 }
 
 /// Start the SSH agent daemon.
+// Keep ownership at the command dispatch boundary.
+#[allow(clippy::needless_pass_by_value)]
 fn run_start(cmd: AgentStartCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
     let socket_path = agent_socket_path(vault_path);
     let pid_path = agent_pid_path(vault_path);
@@ -218,9 +222,9 @@ async fn run_agent_foreground(
     // Create session store for caching vault keys
     let session_store = Arc::new(SessionStore::new());
 
-    let handler = std::sync::Arc::new(std::sync::Mutex::new(
-        AgentHandler::with_session_store(session_store.clone()),
-    ));
+    let handler = std::sync::Arc::new(std::sync::Mutex::new(AgentHandler::with_session_store(
+        session_store.clone(),
+    )));
 
     eprintln!("Padlock SSH agent listening on {}", socket_path.display());
 
@@ -387,6 +391,8 @@ fn run_status(vault_path: &str, json: bool) -> anyhow::Result<()> {
 }
 
 /// Print shell environment variables for agent integration.
+// Keep the same result type as the other agent subcommands.
+#[allow(clippy::unnecessary_wraps)]
 fn run_shell_env(vault_path: &str) -> anyhow::Result<()> {
     let socket_path = agent_socket_path(vault_path);
     println!("export SSH_AUTH_SOCK=\"{}\";", socket_path.display());
@@ -451,14 +457,12 @@ fn run_list(vault_path: &str, json: bool) -> anyhow::Result<()> {
             if offset + 4 > resp_buf.len() {
                 break;
             }
-            let blob_len =
-                u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
+            let blob_len = u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
             offset += 4 + blob_len;
             if offset + 4 > resp_buf.len() {
                 break;
             }
-            let comment_len =
-                u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
+            let comment_len = u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
             offset += 4;
             if offset + comment_len > resp_buf.len() {
                 break;
@@ -480,14 +484,12 @@ fn run_list(vault_path: &str, json: bool) -> anyhow::Result<()> {
             if offset + 4 > resp_buf.len() {
                 break;
             }
-            let blob_len =
-                u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
+            let blob_len = u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
             offset += 4 + blob_len;
             if offset + 4 > resp_buf.len() {
                 break;
             }
-            let comment_len =
-                u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
+            let comment_len = u32::from_be_bytes(resp_buf[offset..offset + 4].try_into()?) as usize;
             offset += 4;
             if offset + comment_len > resp_buf.len() {
                 break;
