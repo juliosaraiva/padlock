@@ -97,8 +97,7 @@ fn run_status(vault_path: &str, json: bool) -> anyhow::Result<()> {
     payload.extend_from_slice(&body);
     let message = build_extension_message(&payload);
 
-    let mut stream = std::os::unix::net::UnixStream::connect(&socket)?;
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    let mut stream = super::agent::connect_session_socket(&socket)?;
     stream.write_all(&message)?;
 
     // Read response
@@ -167,7 +166,7 @@ fn run_status(vault_path: &str, json: bool) -> anyhow::Result<()> {
 fn run_destroy(cmd: SessionDestroyCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
     if cmd.all {
         // Destroy all sessions via the daemon
-        super::destroy_daemon_session(vault_path, None);
+        super::destroy_daemon_session(vault_path, None)?;
         delete_session_token(vault_path);
 
         if json {
@@ -182,10 +181,9 @@ fn run_destroy(cmd: SessionDestroyCmd, vault_path: &str, json: bool) -> anyhow::
         }
     } else {
         // Destroy just the current session
-        let token = read_session_token(vault_path);
-        if let Some(token) = token {
-            super::destroy_daemon_session(vault_path, Some(&token));
-        }
+        let token = read_session_token(vault_path)
+            .ok_or_else(|| anyhow::anyhow!("no current session token"))?;
+        super::destroy_daemon_session(vault_path, Some(&token))?;
         delete_session_token(vault_path);
 
         if json {

@@ -18,20 +18,16 @@ pub struct LockCmd {}
 ///
 /// Returns an error if locking fails.
 pub fn run(_cmd: LockCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
-    let path = super::resolve_vault_path(vault_path);
-
-    // Destroy all daemon sessions
-    destroy_daemon_session(vault_path, None);
-
-    // Delete the session token file
+    let socket = super::agent_socket_path_for_session(vault_path);
+    let agent_was_running = match std::fs::symlink_metadata(socket) {
+        Ok(_) => {
+            destroy_daemon_session(vault_path, None)?;
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
     delete_session_token(vault_path);
-
-    let agent_sock = path
-        .parent()
-        .map(|p| p.join("agent.sock"))
-        .unwrap_or_default();
-
-    let agent_was_running = agent_sock.exists();
 
     if json {
         let output = serde_json::json!({

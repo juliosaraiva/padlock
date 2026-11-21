@@ -215,10 +215,6 @@ fn try_resume_session(vault_path: &str) -> Option<(SecretBuf, SecretBuf)> {
     let token = read_session_token(vault_path)?;
     let socket = agent_socket_path_for_session(vault_path);
 
-    if !socket.exists() {
-        return None;
-    }
-
     // Generate ephemeral keypair for transit encryption (response path)
     let keypair = TransitKeyPair::generate();
     let our_pubkey = keypair.public_key_bytes();
@@ -230,10 +226,7 @@ fn try_resume_session(vault_path: &str) -> Option<(SecretBuf, SecretBuf)> {
     let session_payload = protocol::build_resume_request(&req).ok()?;
     let message = build_extension_message(&session_payload);
 
-    let mut stream = std::os::unix::net::UnixStream::connect(&socket).ok()?;
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .ok()?;
+    let mut stream = agent::connect_session_socket(&socket).ok()?;
     stream.write_all(&message).ok()?;
 
     // Read response
@@ -310,14 +303,7 @@ fn create_daemon_session(
     idle_timeout_secs: u64,
 ) -> Option<Vec<u8>> {
     let socket = agent_socket_path_for_session(vault_path);
-    if !socket.exists() {
-        return None;
-    }
-
-    let mut stream = std::os::unix::net::UnixStream::connect(&socket).ok()?;
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .ok()?;
+    let mut stream = agent::connect_session_socket(&socket).ok()?;
     let req = CreateSessionRequest {
         algorithm: SessionAlgorithm::XChaCha20Poly1305HkdfSha256.to_byte(),
         encrypted_kek: SecretBuf::from_bytes(kek),
@@ -358,41 +344,42 @@ fn create_daemon_session(
     Some(create_resp.token)
 }
 
-/// Send `DestroySession` or `DestroyAll` to the daemon.
-pub fn destroy_daemon_session(vault_path: &str, token: Option<&[u8; SESSION_TOKEN_SIZE]>) {
-    let socket = agent_socket_path_for_session(vault_path);
-    if !socket.exists() {
-        return;
-    }
+/// Send `DestroySession` or `DestroyAll` and require the daemon's success response.
+///
+/// # Errors
+/// Returns an error on connection failure, refusal or invalid acknowledgment.
+pub fn destroy_daemon_session(
+    vault_path: &str,
+    token: Option<&[u8; SESSION_TOKEN_SIZE]>,
+) -> anyhow::Result<()> {
+    use padlock_core::ssh_agent::{protocol::serialize_response, AgentResponse};
 
-    let session_payload = if let Some(token) = token {
-        let req = padlock_core::session::protocol::DestroySessionRequest {
+    let socket = agent_socket_path_for_session(vault_path);
+    let mut stream = agent::connect_session_socket(&socket)?;
+    let payload = if let Some(token) = token {
+        let req = protocol::DestroySessionRequest {
             token: token.to_vec(),
         };
-        protocol::build_destroy_request(&req).ok()
+        protocol::build_destroy_request(&req)?
     } else {
-        Some(protocol::build_destroy_all_request())
+        protocol::build_destroy_all_request()
     };
+    stream.write_all(&build_extension_message(&payload))?;
 
-    let Some(payload) = session_payload else {
-        return;
-    };
-
-    let message = build_extension_message(&payload);
-
-    if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket) {
-        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-        let _ = stream.write_all(&message);
-        // Read and discard response
-        let mut len_buf = [0u8; 4];
-        if stream.read_exact(&mut len_buf).is_ok() {
-            let resp_len = u32::from_be_bytes(len_buf) as usize;
-            if resp_len > 0 && resp_len <= 256 * 1024 {
-                let mut resp_buf = vec![0u8; resp_len];
-                let _ = stream.read_exact(&mut resp_buf);
-            }
-        }
+    let expected = serialize_response(&AgentResponse::ExtensionResponse {
+        payload: protocol::serialize_session_response(&protocol::SessionResponse::Success)?,
+    });
+    let mut header = [0; 4];
+    stream.read_exact(&mut header)?;
+    if header != expected[..4] {
+        anyhow::bail!("agent did not acknowledge session revocation");
     }
+    let mut body = [0; 2];
+    stream.read_exact(&mut body)?;
+    if body != expected[4..] {
+        anyhow::bail!("agent did not acknowledge session revocation");
+    }
+    Ok(())
 }
 
 /// Ensure the agent daemon is running, auto-starting it if necessary.
@@ -417,10 +404,7 @@ pub fn open_vault_with_session(vault_path: &str, no_session: bool) -> anyhow::Re
     let path = resolve_vault_path(vault_path);
     let storage = FilesystemBackend::new(path);
 
-    if !no_session {
-        // Ensure daemon is running before trying to resume
-        ensure_daemon_running(vault_path);
-
+    if !no_session && ensure_daemon_running(vault_path) {
         // Try to resume from session cache
         if let Some((kek, mackey)) = try_resume_session(vault_path) {
             if let Ok(vault) = Vault::open_with_keys(kek, mackey, &storage) {
@@ -437,8 +421,7 @@ pub fn open_vault_with_session(vault_path: &str, no_session: bool) -> anyhow::Re
     // Try to create a session for next time (respecting config)
     if !no_session {
         let cfg = config::load_config(vault_path).unwrap_or_default();
-        if cfg.session.auto_session {
-            ensure_daemon_running(vault_path);
+        if cfg.session.auto_session && ensure_daemon_running(vault_path) {
             if let (Ok(kek), Ok(mackey)) = (vault.kek(), vault.mackey()) {
                 let vault_id = vault.header().vault_uuid;
                 let duration = cfg.session.parsed_duration();
@@ -469,9 +452,7 @@ pub fn open_vault_mut_with_session(
     let path = resolve_vault_path(vault_path);
     let storage = FilesystemBackend::new(path);
 
-    if !no_session {
-        ensure_daemon_running(vault_path);
-
+    if !no_session && ensure_daemon_running(vault_path) {
         // Try to resume from session cache
         if let Some((kek, mackey)) = try_resume_session(vault_path) {
             if let Ok(vault) = Vault::open_with_keys(kek, mackey, &storage) {
@@ -487,8 +468,7 @@ pub fn open_vault_mut_with_session(
     // Try to create a session (respecting config)
     if !no_session {
         let cfg = config::load_config(vault_path).unwrap_or_default();
-        if cfg.session.auto_session {
-            ensure_daemon_running(vault_path);
+        if cfg.session.auto_session && ensure_daemon_running(vault_path) {
             if let (Ok(kek), Ok(mackey)) = (vault.kek(), vault.mackey()) {
                 let vault_id = vault.header().vault_uuid;
                 let duration = cfg.session.parsed_duration();

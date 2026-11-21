@@ -37,8 +37,7 @@ pub fn run(_cmd: UnlockCmd, vault_path: &str, json: bool, no_session: bool) -> a
     let mut session_created = false;
     if !no_session {
         let cfg = super::config::load_config(vault_path).unwrap_or_default();
-        if cfg.session.auto_session {
-            super::ensure_daemon_running(vault_path);
+        if cfg.session.auto_session && super::ensure_daemon_running(vault_path) {
             if let (Ok(kek), Ok(mackey)) = (vault.kek(), vault.mackey()) {
                 let vault_id = vault.header().vault_uuid;
                 let duration = cfg.session.parsed_duration();

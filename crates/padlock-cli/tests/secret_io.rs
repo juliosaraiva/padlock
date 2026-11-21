@@ -59,7 +59,7 @@ fn run_cli(
     stdin: Option<&[u8]>,
     exchanges: &[(&[u8], &[u8])],
 ) -> (Output, Vec<u8>) {
-    run_cli_observed(vault, args, stdin, exchanges, |_, _| {})
+    run_cli_observed(vault, args, stdin, exchanges, false, |_, _| {})
 }
 
 fn run_cli_observed(
@@ -67,6 +67,7 @@ fn run_cli_observed(
     args: &[&str],
     stdin: Option<&[u8]>,
     exchanges: &[(&[u8], &[u8])],
+    session_enabled: bool,
     on_first_input: impl FnOnce(&mut Child, &File),
 ) -> (Output, Vec<u8>) {
     let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
@@ -87,10 +88,16 @@ fn run_cli_observed(
     let output_dir = tempfile::tempdir().unwrap();
     let stdout = output_dir.path().join("stdout");
     let stderr = output_dir.path().join("stderr");
-    let mut cli_args = vec!["--vault-path", vault.to_str().unwrap(), "--no-session"];
+    let mut cli_args = vec!["--vault-path", vault.to_str().unwrap()];
+    if !session_enabled {
+        cli_args.push("--no-session");
+    }
     cli_args.extend_from_slice(args);
     let mut child = Command::new(std::env::current_exe().unwrap())
         .args(["--ignored", "--exact", "attach_test_tty"])
+        .env("HOME", output_dir.path())
+        .env_remove("PADLOCK_SESSION")
+        .env_remove("PADLOCK_VAULT")
         .env("PADLOCK_TEST_TTY", name)
         .env(
             "PADLOCK_TEST_ARGS",
@@ -418,6 +425,7 @@ fn suspend_restores_echo_before_stopping_and_cancels_on_resume() {
         &["set", "suspend"],
         None,
         &[(b"Entry password: ", partial.as_bytes())],
+        false,
         |child, tty| {
             let pid = Pid::from_child(child);
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -444,4 +452,93 @@ fn suspend_restores_echo_before_stopping_and_cancels_on_resume() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("prompt interrupted"));
     assert_no_echo(&output, &transcript);
     assert_eq!(fs::read(vault).unwrap(), original);
+}
+
+#[test]
+fn session_revocation_requires_positive_ack_in_both_scopes() {
+    use padlock_core::session::protocol::{serialize_session_response, SessionResponse};
+    use padlock_core::ssh_agent::{protocol::serialize_response, AgentResponse};
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+
+    let ack = serialize_response(&AgentResponse::ExtensionResponse {
+        payload: serialize_session_response(&SessionResponse::Success).unwrap(),
+    });
+    let refused = serialize_response(&AgentResponse::Failure);
+    let malformed = [0, 0, 0, 2, 6, 0];
+    for all in [false, true] {
+        for reply in [Some(ack.as_slice()), Some(&refused), Some(&malformed), None] {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("agent.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            fs::set_permissions(socket, fs::Permissions::from_mode(0o600)).unwrap();
+            let token = dir.path().join("session.token");
+            fs::write(&token, "a1".repeat(32)).unwrap();
+            let vault = dir.path().join("fixture.vault");
+            std::thread::scope(|scope| {
+                let (done_tx, done_rx) = std::sync::mpsc::channel();
+                let server = scope.spawn(move || {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut size = [0u8; 4];
+                    stream.read_exact(&mut size).unwrap();
+                    let mut request = vec![0; u32::from_be_bytes(size) as usize];
+                    stream.read_exact(&mut request).unwrap();
+                    if let Some(bytes) = reply {
+                        stream.write_all(bytes).unwrap();
+                    } else {
+                        let _ = done_rx.recv_timeout(Duration::from_secs(10));
+                    }
+                });
+                let mut args = vec!["--json", "session", "destroy"];
+                if all {
+                    args.push("--all");
+                }
+                let out = Command::new(CLI)
+                    .arg("--vault-path")
+                    .arg(vault)
+                    .args(args)
+                    .env_remove("PADLOCK_SESSION")
+                    .output()
+                    .unwrap();
+                let _ = done_tx.send(());
+                server.join().unwrap();
+                let expected = reply == Some(ack.as_slice());
+                assert_eq!(out.status.success(), expected);
+                assert_eq!(token.exists(), !expected);
+                if expected {
+                    let result: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+                    assert_eq!(result["destroyed"], if all { "all" } else { "current" });
+                } else {
+                    assert_eq!(out.stdout, [] as [u8; 0]);
+                    assert_ne!(out.stderr, [] as [u8; 0]);
+                }
+            });
+        }
+    }
+}
+
+#[test]
+fn unlock_skips_unsafe_session_socket() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+
+    let dir = tempfile::tempdir().unwrap();
+    fixture(dir.path());
+    let path = dir.path().join("agent.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o666)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (out, _) = run_cli_observed(
+        &dir.path().join("fixture.vault"),
+        &["--json", "unlock"],
+        None,
+        &[(b"Passphrase:", PASSPHRASE)],
+        true,
+        |_, _| {},
+    );
+    assert!(out.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["session_created"], false);
+    assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
+    assert!(!dir.path().join("session.token").exists());
 }

@@ -109,6 +109,32 @@ fn socket_metadata(path: &Path) -> io::Result<Metadata> {
     Ok(metadata)
 }
 
+/// Connect to an owned session socket and validate the connected peer before any writes.
+pub(super) fn connect_session_socket(path: &Path) -> io::Result<UnixStream> {
+    let artifact = AgentArtifact::new(path.to_path_buf(), &socket_metadata(path)?);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let stream = runtime.block_on(async {
+        tokio::time::timeout(AGENT_READY_TIMEOUT, tokio::net::UnixStream::connect(path)).await?
+    })?;
+    // UID checks trust processes running as this user. The inode check rejects replacement
+    // during connect within the supported stable-directory boundary.
+    if stream.peer_cred()?.uid() != geteuid().as_raw() || !artifact.matches(&socket_metadata(path)?)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "agent socket identity changed",
+        ));
+    }
+    let stream = stream.into_std()?;
+    stream.set_nonblocking(false)?;
+    let timeout = Some(Duration::from_secs(5));
+    stream.set_read_timeout(timeout)?;
+    stream.set_write_timeout(timeout)?;
+    Ok(stream)
+}
+
 fn probe_owned_socket(path: &Path) -> io::Result<()> {
     socket_metadata(path)?;
     let fd = socket(AddressFamily::UNIX, SocketType::STREAM, None)?;
@@ -203,9 +229,12 @@ impl AgentArtifact {
         }
     }
 
+    fn matches(&self, metadata: &Metadata) -> bool {
+        metadata.dev() == self.device && metadata.ino() == self.inode
+    }
+
     fn still_owned(&self) -> bool {
-        fs::symlink_metadata(&self.path)
-            .is_ok_and(|metadata| metadata.dev() == self.device && metadata.ino() == self.inode)
+        fs::symlink_metadata(&self.path).is_ok_and(|metadata| self.matches(&metadata))
     }
 
     fn cleanup(&self) {
