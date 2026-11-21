@@ -84,11 +84,12 @@ pub fn decrypt_entry(blob: &[u8], kek: &SecretBuf) -> crate::error::Result<Vec<u
     // Parse the blob
     let dek_nonce = &blob[..NONCE_SIZE];
     let wrapped_dek = &blob[NONCE_SIZE..NONCE_SIZE + KEY_SIZE + TAG_SIZE];
-    let data_nonce = &blob[NONCE_SIZE + KEY_SIZE + TAG_SIZE..NONCE_SIZE + KEY_SIZE + TAG_SIZE + NONCE_SIZE];
+    let data_nonce =
+        &blob[NONCE_SIZE + KEY_SIZE + TAG_SIZE..NONCE_SIZE + KEY_SIZE + TAG_SIZE + NONCE_SIZE];
     let ciphertext = &blob[NONCE_SIZE + KEY_SIZE + TAG_SIZE + NONCE_SIZE..];
 
     // Unwrap the DEK
-    let dek_bytes = aead_decrypt(kek, dek_nonce, &[], wrapped_dek)?;
+    let dek_bytes = zeroize::Zeroizing::new(aead_decrypt(kek, dek_nonce, &[], wrapped_dek)?);
     let dek = SecretBuf::from_bytes(&dek_bytes);
 
     // Decrypt the entry data

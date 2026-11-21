@@ -1,8 +1,8 @@
 //! `padlock status` command implementation.
 
 use clap::Args;
-use padlock_core::vault::storage::FilesystemBackend;
 use padlock_core::traits::storage::StorageBackend;
+use padlock_core::vault::storage::FilesystemBackend;
 
 use super::resolve_vault_path;
 use crate::output::OutputFormatter;
@@ -12,6 +12,10 @@ use crate::output::OutputFormatter;
 pub struct StatusCmd {}
 
 /// Execute the status command.
+///
+/// # Errors
+///
+/// Returns an error if vault status check fails.
 pub fn run(vault_path: &str, fmt: &OutputFormatter) -> anyhow::Result<()> {
     let path = resolve_vault_path(vault_path);
     let storage = FilesystemBackend::new(path.clone());

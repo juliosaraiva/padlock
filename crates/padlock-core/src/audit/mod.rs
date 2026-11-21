@@ -1,7 +1,11 @@
-//! Tamper-evident audit logging for vault operations.
+//! Audit event storage for vault operations.
 //!
-//! Records all vault access events, credential operations, and
-//! signing requests. Audit events intentionally exclude any secret data.
+//! The JSON Lines backend stores unsigned records and skips malformed lines.
+//! The CLI currently reads these records but has no vault-operation writer.
+//! A verifiable audit control needs authenticated sequence numbers and records,
+//! a separately trusted checkpoint to detect truncation or rollback, and a
+//! cross-process append lock. Wire CLI successes and failures into that writer
+//! and surface write errors before claiming audit coverage.
 //!
 //! The audit log implementation uses the `AuditLogger` trait from
 //! `crate::traits::audit` for pluggable backends.
@@ -89,7 +93,7 @@ pub struct JsonLinesAuditLog {
     /// Path to the audit log file.
     path: PathBuf,
     /// Mutex to serialize concurrent writes.
-    _lock: Mutex<()>,
+    lock: Mutex<()>,
 }
 
 impl JsonLinesAuditLog {
@@ -108,7 +112,7 @@ impl JsonLinesAuditLog {
         }
         Ok(Self {
             path,
-            _lock: Mutex::new(()),
+            lock: Mutex::new(()),
         })
     }
 
@@ -145,15 +149,16 @@ impl std::fmt::Debug for JsonLinesAuditLog {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JsonLinesAuditLog")
             .field("path", &self.path)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
 impl AuditLogger for JsonLinesAuditLog {
     fn log_event(&self, event: &AuditEvent) -> Result<()> {
-        let _guard = self._lock.lock().map_err(|e| {
-            crate::error::Error::Config(format!("audit log lock poisoned: {e}"))
-        })?;
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|e| crate::error::Error::Config(format!("audit log lock poisoned: {e}")))?;
 
         let mut file = OpenOptions::new()
             .create(true)
@@ -207,13 +212,7 @@ mod tests {
     #[test]
     fn test_log_vault_operation_success() {
         let logger = InMemoryAuditLog::new();
-        let result = log_vault_operation(
-            &logger,
-            AuditAction::VaultInit,
-            None,
-            true,
-            None,
-        );
+        let result = log_vault_operation(&logger, AuditAction::VaultInit, None, true, None);
         assert!(result.is_ok());
     }
 
@@ -248,13 +247,13 @@ mod tests {
         log.log_event(&event2).unwrap();
 
         // Read back
-        let events = log.read_events().unwrap();
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].action, AuditAction::VaultInit);
-        assert_eq!(events[0].result, AuditResult::Success);
-        assert_eq!(events[1].action, AuditAction::VaultUnlock);
-        assert_eq!(events[1].result, AuditResult::Failure);
-        assert_eq!(events[1].resource_id.as_deref(), Some("vault-1"));
+        let all_events = log.read_events().unwrap();
+        assert_eq!(all_events.len(), 2);
+        assert_eq!(all_events[0].action, AuditAction::VaultInit);
+        assert_eq!(all_events[0].result, AuditResult::Success);
+        assert_eq!(all_events[1].action, AuditAction::VaultUnlock);
+        assert_eq!(all_events[1].result, AuditResult::Failure);
+        assert_eq!(all_events[1].resource_id.as_deref(), Some("vault-1"));
     }
 
     #[test]

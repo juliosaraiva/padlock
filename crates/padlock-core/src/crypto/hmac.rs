@@ -28,11 +28,46 @@ type HmacSha256 = Hmac<Sha256>;
 /// # Returns
 ///
 /// A 32-byte HMAC tag.
+///
+/// # Panics
+///
+/// Panics if the key slice cannot be used (this should not happen as
+/// HMAC-SHA-256 accepts any key length).
 #[must_use]
 pub fn compute_hmac(key: &[u8], data: &[u8]) -> [u8; HMAC_SIZE] {
-    let mut mac =
-        HmacSha256::new_from_slice(key).expect("HMAC-SHA-256 accepts any key length");
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-SHA-256 accepts any key length");
     mac.update(data);
+    let result = mac.finalize();
+    let bytes = result.into_bytes();
+    let mut output = [0u8; HMAC_SIZE];
+    output.copy_from_slice(&bytes);
+    output
+}
+
+/// Compute HMAC-SHA-256 incrementally over multiple data segments.
+///
+/// This avoids assembling all data into a single buffer before computing
+/// the HMAC, reducing peak memory usage during vault writes.
+///
+/// # Arguments
+///
+/// * `key` - HMAC key (MACKEY derived from PDK, typically 32 bytes)
+/// * `segments` - Ordered data segments to authenticate
+///
+/// # Returns
+///
+/// A 32-byte HMAC tag over the concatenation of all segments.
+///
+/// # Panics
+///
+/// Panics if the HMAC key slice cannot be used (should not happen as
+/// HMAC-SHA-256 accepts any key length).
+#[must_use]
+pub fn compute_hmac_incremental(key: &[u8], segments: &[&[u8]]) -> [u8; HMAC_SIZE] {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-SHA-256 accepts any key length");
+    for segment in segments {
+        mac.update(segment);
+    }
     let result = mac.finalize();
     let bytes = result.into_bytes();
     let mut output = [0u8; HMAC_SIZE];
@@ -54,9 +89,13 @@ pub fn compute_hmac(key: &[u8], data: &[u8]) -> [u8; HMAC_SIZE] {
 /// # Errors
 ///
 /// Returns `CryptoError::AuthenticationFailed` if the HMAC does not match.
+///
+/// # Panics
+///
+/// Panics if the key slice cannot be used (this should not happen as
+/// HMAC-SHA-256 accepts any key length).
 pub fn verify_hmac(key: &[u8], data: &[u8], expected_tag: &[u8]) -> Result<()> {
-    let mut mac =
-        HmacSha256::new_from_slice(key).expect("HMAC-SHA-256 accepts any key length");
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-SHA-256 accepts any key length");
     mac.update(data);
 
     mac.verify_slice(expected_tag)
@@ -167,5 +206,48 @@ mod tests {
         assert_eq!(tag.len(), HMAC_SIZE);
         // Empty data HMAC should still be a valid tag
         assert!(verify_hmac(&key, b"", &tag).is_ok());
+    }
+
+    #[test]
+    fn test_compute_hmac_incremental_matches_single_call() {
+        let key = test_key();
+        let part1 = b"header data ";
+        let part2 = b"index data ";
+        let part3 = b"entries blob";
+
+        // Concatenated HMAC
+        let mut all = Vec::new();
+        all.extend_from_slice(part1);
+        all.extend_from_slice(part2);
+        all.extend_from_slice(part3);
+        let tag_single = compute_hmac(&key, &all);
+
+        // Incremental HMAC
+        let tag_incremental = compute_hmac_incremental(
+            &key,
+            &[part1.as_slice(), part2.as_slice(), part3.as_slice()],
+        );
+
+        assert_eq!(
+            tag_single, tag_incremental,
+            "incremental HMAC must match single-call HMAC"
+        );
+    }
+
+    #[test]
+    fn test_compute_hmac_incremental_empty_segments() {
+        let key = test_key();
+        let tag_empty = compute_hmac_incremental(&key, &[]);
+        let tag_single = compute_hmac(&key, b"");
+        assert_eq!(tag_empty, tag_single);
+    }
+
+    #[test]
+    fn test_compute_hmac_incremental_single_segment() {
+        let key = test_key();
+        let data = b"single segment";
+        let tag_incremental = compute_hmac_incremental(&key, &[data.as_slice()]);
+        let tag_single = compute_hmac(&key, data);
+        assert_eq!(tag_incremental, tag_single);
     }
 }

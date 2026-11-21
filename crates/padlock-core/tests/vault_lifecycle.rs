@@ -3,11 +3,11 @@
 //! Tests init, open, lock, unlock, passphrase change, and
 //! data persistence across vault reopen cycles.
 
-use padlock_core::vault::lifecycle::{KdfParams, Vault, VaultState};
-use padlock_core::vault::storage::FilesystemBackend;
+use padlock_core::types::Timestamp;
 use padlock_core::vault::entries::{decrypt_entry, encrypt_entry};
 use padlock_core::vault::format::EntryMetadata;
-use padlock_core::types::Timestamp;
+use padlock_core::vault::lifecycle::{KdfParams, Vault, VaultState};
+use padlock_core::vault::storage::FilesystemBackend;
 use tempfile::TempDir;
 
 fn test_params() -> KdfParams {
@@ -134,6 +134,109 @@ fn test_vault_open_preserves_uuid() {
     assert_eq!(vault2.header().vault_uuid, uuid1);
 }
 
+#[test]
+fn vault_rejects_untrusted_kdf_costs_before_authentication() {
+    use padlock_core::error::{CryptoError, Error};
+
+    let dir = TempDir::new().unwrap();
+    let backend = create_backend(&dir);
+    let params = test_params();
+    Vault::init("pass", &backend, &params).unwrap();
+    let original = std::fs::read(backend.vault_path()).unwrap();
+
+    for (memory, time, lanes) in [
+        (1_048_577_u32, 1_u32, 1_u32),
+        (64, 5, 1),
+        (64, 1, 5),
+        (1_048_576, 3, 4),
+        (0, 1, 1),
+        (64, 0, 1),
+        (64, 1, 0),
+        (8, 1, 4),
+    ] {
+        let mut bytes = original.clone();
+        bytes[76..80].copy_from_slice(&memory.to_le_bytes());
+        bytes[80..84].copy_from_slice(&time.to_le_bytes());
+        bytes[84..88].copy_from_slice(&lanes.to_le_bytes());
+        std::fs::write(backend.vault_path(), bytes).unwrap();
+        assert!(
+            matches!(
+                Vault::open("pass", &backend, &params),
+                Err(Error::Crypto(CryptoError::Argon2Error(_)))
+            ),
+            "{memory}/{time}/{lanes}"
+        );
+    }
+}
+
+#[test]
+fn vault_legacy_header_uses_fallback_and_rejects_authenticated_trailing_bytes() {
+    use padlock_core::crypto::hmac::{compute_hmac, HMAC_SIZE};
+    use padlock_core::error::{Error, VaultError};
+
+    let dir = TempDir::new().unwrap();
+    let backend = create_backend(&dir);
+    let params = test_params();
+    let vault = Vault::init("pass", &backend, &params).unwrap();
+    let mut bytes = std::fs::read(backend.vault_path()).unwrap();
+    bytes.truncate(bytes.len() - HMAC_SIZE);
+    bytes[76..88].fill(0);
+    let mac = compute_hmac(vault.mackey().unwrap(), &bytes);
+    let mut legacy = bytes.clone();
+    legacy.extend_from_slice(&mac);
+    std::fs::write(backend.vault_path(), legacy).unwrap();
+    assert!(Vault::open("pass", &backend, &params).is_ok());
+
+    bytes.push(0);
+    let mac = compute_hmac(vault.mackey().unwrap(), &bytes);
+    bytes.extend_from_slice(&mac);
+    std::fs::write(backend.vault_path(), bytes).unwrap();
+    assert!(matches!(
+        Vault::open("pass", &backend, &params),
+        Err(Error::Vault(VaultError::CorruptedData))
+    ));
+}
+
+#[test]
+fn vault_rejects_trailing_messagepack_inside_authenticated_index_on_all_open_paths() {
+    use padlock_core::crypto::hmac::{compute_hmac, HMAC_SIZE};
+    use padlock_core::crypto::secret_buf::SecretBuf;
+    use padlock_core::error::{Error, VaultError};
+    use padlock_core::vault::format::{parse_header, serialize_header, HEADER_SIZE};
+
+    let dir = TempDir::new().unwrap();
+    let backend = create_backend(&dir);
+    let params = test_params();
+    let mut vault = Vault::init("pass", &backend, &params).unwrap();
+    let recovery_key = vault.enable_recovery(&backend).unwrap();
+    let kek = vault.kek().unwrap();
+    let mackey = vault.mackey().unwrap();
+    let mut bytes = std::fs::read(backend.vault_path()).unwrap();
+    bytes.truncate(bytes.len() - HMAC_SIZE);
+    let mut header = parse_header(&bytes).unwrap();
+    bytes.insert(HEADER_SIZE + header.vault_index_length as usize, 0xC0);
+    header.vault_index_length += 1;
+    bytes[..HEADER_SIZE].copy_from_slice(&serialize_header(&header));
+    let mac = compute_hmac(mackey, &bytes);
+    bytes.extend_from_slice(&mac);
+    std::fs::write(backend.vault_path(), bytes).unwrap();
+
+    for result in [
+        Vault::open("pass", &backend, &params),
+        Vault::open_with_keys(
+            SecretBuf::from_bytes(kek),
+            SecretBuf::from_bytes(mackey),
+            &backend,
+        ),
+        Vault::recover(&recovery_key, &backend),
+    ] {
+        assert!(matches!(
+            result,
+            Err(Error::Vault(VaultError::InvalidFormat { reason })) if reason == "trailing bytes in vault index"
+        ));
+    }
+}
+
 // --- Data persistence across reopen ---
 
 #[test]
@@ -148,8 +251,8 @@ fn test_vault_reopen_preserves_entry_data() {
     let plaintext = b"username=admin\npassword=hunter2";
     let encrypted = encrypt_entry(plaintext, kek).unwrap();
     let entry_uuid = [0x42; 16];
-    let now = Timestamp::now().as_epoch_secs() as u64;
-    let entry_len = encrypted.len() as u32;
+    let now = u64::try_from(Timestamp::now().as_epoch_secs()).expect("epoch seconds are positive");
+    let entry_len = u32::try_from(encrypted.len()).expect("fits in u32");
 
     vault.index_mut().unwrap().entries.insert(
         entry_uuid,
@@ -161,6 +264,7 @@ fn test_vault_reopen_preserves_entry_data() {
             modified_at: now,
             deleted: false,
             title: "admin-creds".to_string(),
+            tags: vec![],
         },
     );
     vault.set_entries_blob(encrypted).unwrap();
@@ -171,8 +275,9 @@ fn test_vault_reopen_preserves_entry_data() {
     assert_eq!(vault2.index().entries.len(), 1);
     let meta = vault2.index().entries.get(&entry_uuid).unwrap();
     assert_eq!(meta.title, "admin-creds");
-    let blob = &vault2.entries_blob()
-        [meta.entry_offset as usize..meta.entry_offset as usize + meta.entry_length as usize];
+    let offset = usize::try_from(meta.entry_offset).expect("fits in usize");
+    let len = usize::try_from(meta.entry_length).expect("fits in usize");
+    let blob = &vault2.entries_blob()[offset..offset + len];
     let decrypted = decrypt_entry(blob, vault2.kek().unwrap()).unwrap();
     assert_eq!(decrypted, plaintext);
 }
@@ -192,13 +297,13 @@ fn test_vault_reopen_preserves_multiple_entries() {
         let kek = vault.kek().unwrap();
         let encrypted = encrypt_entry(plaintext.as_bytes(), kek).unwrap();
         let uuid = [i + 1; 16];
-        let offset = blob.len() as u64;
-        let length = encrypted.len() as u32;
+        let offset = u64::try_from(blob.len()).expect("fits in u64");
+        let length = u32::try_from(encrypted.len()).expect("fits in u32");
         blob.extend_from_slice(&encrypted);
         entries_info.push((uuid, offset, length, format!("entry-{i}")));
     }
 
-    let now = Timestamp::now().as_epoch_secs() as u64;
+    let now = u64::try_from(Timestamp::now().as_epoch_secs()).expect("epoch seconds are positive");
     for (uuid, offset, length, title) in entries_info {
         vault.index_mut().unwrap().entries.insert(
             uuid,
@@ -210,6 +315,7 @@ fn test_vault_reopen_preserves_multiple_entries() {
                 modified_at: now,
                 deleted: false,
                 title,
+                tags: vec![],
             },
         );
     }
@@ -223,8 +329,9 @@ fn test_vault_reopen_preserves_multiple_entries() {
     for i in 0u8..5 {
         let uuid = [i + 1; 16];
         let meta = vault2.index().entries.get(&uuid).unwrap();
-        let entry_blob = &vault2.entries_blob()
-            [meta.entry_offset as usize..meta.entry_offset as usize + meta.entry_length as usize];
+        let offset = usize::try_from(meta.entry_offset).expect("fits in usize");
+        let len = usize::try_from(meta.entry_length).expect("fits in usize");
+        let entry_blob = &vault2.entries_blob()[offset..offset + len];
         let decrypted = decrypt_entry(entry_blob, vault2.kek().unwrap()).unwrap();
         assert_eq!(decrypted, format!("entry-data-{i}").as_bytes());
     }
@@ -243,8 +350,8 @@ fn test_vault_change_passphrase_new_passphrase_works() {
     let kek = vault.kek().unwrap();
     let encrypted = encrypt_entry(b"preserved-secret", kek).unwrap();
     let entry_uuid = [0xAA; 16];
-    let now = Timestamp::now().as_epoch_secs() as u64;
-    let entry_len = encrypted.len() as u32;
+    let now = u64::try_from(Timestamp::now().as_epoch_secs()).expect("epoch seconds are positive");
+    let entry_len = u32::try_from(encrypted.len()).expect("fits in u32");
 
     vault.index_mut().unwrap().entries.insert(
         entry_uuid,
@@ -256,6 +363,7 @@ fn test_vault_change_passphrase_new_passphrase_works() {
             modified_at: now,
             deleted: false,
             title: "secret".to_string(),
+            tags: vec![],
         },
     );
     vault.set_entries_blob(encrypted).unwrap();
@@ -269,8 +377,9 @@ fn test_vault_change_passphrase_new_passphrase_works() {
     // New passphrase works
     let vault2 = Vault::open("new-pass", &backend, &params).unwrap();
     let meta = vault2.index().entries.get(&entry_uuid).unwrap();
-    let blob = &vault2.entries_blob()
-        [meta.entry_offset as usize..meta.entry_offset as usize + meta.entry_length as usize];
+    let offset = usize::try_from(meta.entry_offset).expect("fits in usize");
+    let len = usize::try_from(meta.entry_length).expect("fits in usize");
+    let blob = &vault2.entries_blob()[offset..offset + len];
     let decrypted = decrypt_entry(blob, vault2.kek().unwrap()).unwrap();
     assert_eq!(decrypted, b"preserved-secret");
 }

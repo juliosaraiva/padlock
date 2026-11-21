@@ -23,7 +23,7 @@ Padlock uses XChaCha20-Poly1305 for authenticated encryption, Argon2id for key d
 - **Password generation** -- configurable length and character sets with strength estimation
 - **TOTP code generation** -- RFC 6238 time-based one-time passwords
 - **Secret injection** -- `padlock exec VAR=entry -- cmd` injects secrets as environment variables
-- **Tamper-evident audit log** -- tracks all vault operations
+- **Audit log reader** — displays unsigned JSON Lines events
 - **JSON output mode** -- `--json` flag on all commands for scripting
 - **Shell completions** -- bash, zsh, fish
 
@@ -107,7 +107,7 @@ padlock completions fish > ~/.config/fish/completions/padlock.fish
 padlock init
 
 # Store a credential
-padlock set github -u myuser -p "ghp_xxxxxxxxxxxx"
+padlock set github -u myuser
 
 # Retrieve it
 padlock get github
@@ -124,6 +124,12 @@ padlock ls
 # Search by name or tag
 padlock search api
 ```
+
+Use the hidden entry prompt or pipe a secret producer into `padlock set github --password-stdin`.
+Both inputs accept up to 512 UTF-8 bytes. Stdin reads through EOF and preserves every byte, including any newline.
+The hidden prompt uses terminal line editing and input settings, including configured backspace and carriage-return handling. It removes the final newline. Ctrl-C cancels. Ctrl-Z restores the terminal before suspending and cancels the command when resumed.
+Replace legacy `set --password` and `set -p` invocations with one of these input modes.
+`padlock get github` shows metadata. Use `padlock get github --password-only` when a consumer explicitly needs the password on stdout.
 
 ## Usage
 
@@ -211,7 +217,7 @@ Available keys: `session.duration`, `session.max_sessions`, `session.auto_sessio
 - **`mlock`** for key material memory pages
 - **Constant-time comparisons** via `subtle::ConstantTimeEq`
 - **0600 file permissions** on vault, socket, and session token
-- **Tamper-evident audit log** (HMAC chain)
+- **Planned audit integrity** — authenticated log records and a trusted checkpoint
 - **`#![forbid(unsafe_code)]`** in the CLI crate
 
 See [docs/SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md) for the full security design.

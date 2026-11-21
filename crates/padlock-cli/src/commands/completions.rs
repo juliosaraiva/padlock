@@ -1,6 +1,6 @@
 //! Shell completion script generation.
 //!
-//! Outputs shell completion scripts for bash, zsh, fish, and PowerShell
+//! Outputs shell completion scripts for bash, zsh, fish, and `PowerShell`
 //! to stdout. Users source the output in their shell config.
 
 use clap::{Args, CommandFactory, ValueEnum};
@@ -25,12 +25,17 @@ pub enum ShellType {
     Zsh,
     /// Fish shell.
     Fish,
-    /// PowerShell.
+    /// `PowerShell`.
     #[value(name = "powershell")]
     PowerShell,
 }
 
 /// Run the completions command.
+///
+/// # Errors
+///
+/// This function does not currently return errors but is typed for consistency.
+#[allow(clippy::needless_pass_by_value)]
 pub fn run(cmd: CompletionsCmd) -> anyhow::Result<()> {
     let cli_cmd = Cli::command();
 
@@ -41,7 +46,7 @@ pub fn run(cmd: CompletionsCmd) -> anyhow::Result<()> {
         ShellType::PowerShell => {
             aot::PowerShell.generate(&cli_cmd, &mut std::io::stdout());
         }
-    };
+    }
 
     Ok(())
 }

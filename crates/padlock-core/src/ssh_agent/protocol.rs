@@ -20,7 +20,7 @@ const SSH_AGENT_FAILURE: u8 = 5;
 
 /// Parsed SSH agent request message.
 #[derive(Debug, Clone)]
-pub enum AgentMessage {
+pub enum AgentMessage<'a> {
     /// Request list of available identities (keys).
     RequestIdentities,
     /// Request a signature using a specific key.
@@ -53,10 +53,30 @@ pub enum AgentMessage {
         /// Extension name.
         name: String,
         /// Extension payload (after the name).
-        payload: Vec<u8>,
+        payload: ExtensionPayload<'a>,
     },
     /// Unknown or unsupported message type.
     Unknown(u8),
+}
+
+/// Borrowed extension bytes. Debug output excludes the payload.
+#[derive(Clone, Copy)]
+pub struct ExtensionPayload<'a>(&'a [u8]);
+
+impl<'a> ExtensionPayload<'a> {
+    /// View the extension payload without copying it.
+    #[must_use]
+    pub fn as_bytes(self) -> &'a [u8] {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for ExtensionPayload<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExtensionPayload")
+            .finish_non_exhaustive()
+    }
 }
 
 /// SSH agent response to send back to the client.
@@ -64,7 +84,7 @@ pub enum AgentMessage {
 pub enum AgentResponse {
     /// List of available identities.
     IdentitiesAnswer {
-        /// List of (public_key_blob, comment) pairs.
+        /// List of (`public_key_blob`, comment) pairs.
         keys: Vec<(Vec<u8>, String)>,
     },
     /// Signature response.
@@ -92,7 +112,7 @@ fn read_u32(data: &[u8]) -> Option<u32> {
 }
 
 /// Read a length-prefixed string/blob from a byte slice.
-/// Returns (value, bytes_consumed).
+/// Returns (`value`, `bytes_consumed`).
 fn read_string(data: &[u8]) -> Option<(Vec<u8>, usize)> {
     let len = read_u32(data)? as usize;
     if data.len() < 4 + len {
@@ -109,7 +129,7 @@ fn read_string(data: &[u8]) -> Option<(Vec<u8>, usize)> {
 /// # Errors
 ///
 /// Returns `AgentError::ProtocolError` if the message is malformed.
-pub fn parse_message(data: &[u8]) -> crate::error::Result<AgentMessage> {
+pub fn parse_message(data: &[u8]) -> crate::error::Result<AgentMessage<'_>> {
     if data.is_empty() {
         return Err(Error::Agent(AgentError::ProtocolError(
             "empty message".to_string(),
@@ -190,7 +210,7 @@ pub fn parse_message(data: &[u8]) -> crate::error::Result<AgentMessage> {
                     "invalid extension name encoding".to_string(),
                 ))
             })?;
-            let extension_payload = payload[consumed..].to_vec();
+            let extension_payload = ExtensionPayload(&payload[consumed..]);
             Ok(AgentMessage::Extension {
                 name,
                 payload: extension_payload,
@@ -204,6 +224,11 @@ pub fn parse_message(data: &[u8]) -> crate::error::Result<AgentMessage> {
 /// Serialize an SSH agent response to wire bytes.
 ///
 /// Returns the complete message including the 4-byte length prefix.
+///
+/// # Panics
+///
+/// Panics if any field length exceeds `u32::MAX` bytes (not possible in
+/// practice for valid SSH agent messages).
 #[must_use]
 pub fn serialize_response(response: &AgentResponse) -> Vec<u8> {
     let mut payload = Vec::new();
@@ -211,18 +236,34 @@ pub fn serialize_response(response: &AgentResponse) -> Vec<u8> {
     match response {
         AgentResponse::IdentitiesAnswer { keys } => {
             payload.push(SSH_AGENT_IDENTITIES_ANSWER);
-            payload.extend_from_slice(&(keys.len() as u32).to_be_bytes());
+            payload.extend_from_slice(
+                &u32::try_from(keys.len())
+                    .expect("key count fits in u32")
+                    .to_be_bytes(),
+            );
             for (blob, comment) in keys {
-                payload.extend_from_slice(&(blob.len() as u32).to_be_bytes());
+                payload.extend_from_slice(
+                    &u32::try_from(blob.len())
+                        .expect("blob length fits in u32")
+                        .to_be_bytes(),
+                );
                 payload.extend_from_slice(blob);
                 let comment_bytes = comment.as_bytes();
-                payload.extend_from_slice(&(comment_bytes.len() as u32).to_be_bytes());
+                payload.extend_from_slice(
+                    &u32::try_from(comment_bytes.len())
+                        .expect("comment length fits in u32")
+                        .to_be_bytes(),
+                );
                 payload.extend_from_slice(comment_bytes);
             }
         }
         AgentResponse::SignResponse { signature } => {
             payload.push(SSH_AGENT_SIGN_RESPONSE);
-            payload.extend_from_slice(&(signature.len() as u32).to_be_bytes());
+            payload.extend_from_slice(
+                &u32::try_from(signature.len())
+                    .expect("signature length fits in u32")
+                    .to_be_bytes(),
+            );
             payload.extend_from_slice(signature);
         }
         AgentResponse::ExtensionResponse {
@@ -240,7 +281,7 @@ pub fn serialize_response(response: &AgentResponse) -> Vec<u8> {
     }
 
     // Prepend length
-    let len = payload.len() as u32;
+    let len = u32::try_from(payload.len()).expect("payload length fits in u32");
     let mut message = Vec::with_capacity(4 + payload.len());
     message.extend_from_slice(&len.to_be_bytes());
     message.extend_from_slice(&payload);
@@ -293,7 +334,9 @@ mod tests {
         let msg = parse_message(&data).unwrap();
         match msg {
             AgentMessage::SignRequest {
-                key_blob, data: sign_data, flags,
+                key_blob,
+                data: sign_data,
+                flags,
             } => {
                 assert_eq!(key_blob, b"key1");
                 assert_eq!(sign_data, b"hello");
@@ -316,9 +359,7 @@ mod tests {
     #[test]
     fn test_serialize_identities_answer_with_keys() {
         let response = AgentResponse::IdentitiesAnswer {
-            keys: vec![
-                (b"pubkey1".to_vec(), "comment1".to_string()),
-            ],
+            keys: vec![(b"pubkey1".to_vec(), "comment1".to_string())],
         };
         let bytes = serialize_response(&response);
         assert!(bytes.len() > 9);

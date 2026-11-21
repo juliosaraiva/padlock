@@ -14,10 +14,10 @@
 //! - **`entries`**: Entry types, CRUD operations, serialization
 //! - **`ssh_agent`**: SSH agent protocol handler
 //! - **`signing`**: Git commit/tag signing via SSH keys
-//! - **`audit`**: Tamper-evident audit log
+//! - **`audit`**: Audit event storage
 //! - **`generate`**: Password, TOTP secret, and SSH key generation
 //! - **`traits`**: Abstraction boundaries (storage, keyring, user interaction)
-//! - **`types`**: Shared domain types (Entry, SecretBuf, identifiers)
+//! - **`types`**: Shared domain types (Entry, `SecretBuf`, identifiers)
 //!
 //! # Security Priority
 //!

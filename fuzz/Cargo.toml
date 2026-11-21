@@ -29,3 +29,5 @@ doc = false
 libfuzzer-sys = "0.4"
 padlock-core = { path = "../crates/padlock-core" }
 rmp-serde = "1.3"
+
+[workspace]
