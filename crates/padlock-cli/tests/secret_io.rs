@@ -620,3 +620,40 @@ fn recovery_output_round_trips_and_mismatch_preserves_vault() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("passphrases do not match"));
     assert_eq!(storage.read_vault().unwrap(), before);
 }
+
+#[test]
+fn unicode_name_lookup_works_for_search_get_and_remove() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = fixture(dir.path());
+    let path = storage.vault_path();
+    let passphrase = [(b"Passphrase:".as_slice(), PASSPHRASE)];
+    let (out, _) = run_cli(
+        path,
+        &[
+            "set",
+            "Über-account",
+            "--username",
+            "test-user",
+            "--password-stdin",
+        ],
+        Some(SENTINEL.as_bytes()),
+        &passphrase,
+    );
+    assert!(out.status.success());
+
+    for args in [
+        &["--json", "search", "üBER"][..],
+        &["--json", "get", "üBER"],
+    ] {
+        let (out, transcript) = run_cli(path, args, None, &passphrase);
+        assert!(out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).contains("Über-account"));
+        assert_no_echo(&out, &transcript);
+    }
+
+    let (out, _) = run_cli(path, &["rm", "--force", "üBER"], None, &passphrase);
+    assert!(out.status.success());
+    let (out, _) = run_cli(path, &["get", "über"], None, &passphrase);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no entry found"));
+}

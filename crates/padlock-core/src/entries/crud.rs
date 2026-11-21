@@ -184,39 +184,21 @@ pub fn list_entries(vault: &Vault) -> crate::error::Result<Vec<(EntryId, String)
     Ok(entries)
 }
 
-/// Case-insensitive substring check using ASCII case folding.
-///
-/// Allocates a folded copy of each nonempty needle.
-fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    let needle_bytes: Vec<u8> = needle.bytes().map(|b| b.to_ascii_lowercase()).collect();
-    haystack
-        .as_bytes()
-        .windows(needle_bytes.len())
-        .any(|window| {
-            window
-                .iter()
-                .zip(needle_bytes.iter())
-                .all(|(a, b)| a.to_ascii_lowercase() == *b)
-        })
-}
-
-/// Search entries by name (case-insensitive substring match).
+/// Search entry names for a substring after Unicode lowercasing.
 ///
 /// # Errors
 ///
 /// Returns `VaultError::Locked` if the vault is not unlocked.
 pub fn search_by_name(vault: &Vault, query: &str) -> crate::error::Result<Vec<Entry>> {
     let kek = vault.kek()?;
+    let query_lower = query.to_lowercase();
     let mut results = Vec::new();
 
     for meta in vault.index().entries.values() {
         if meta.deleted {
             continue;
         }
-        if contains_case_insensitive(&meta.title, query) {
+        if meta.title.to_lowercase().contains(&query_lower) {
             let Ok(offset) = usize::try_from(meta.entry_offset) else {
                 continue;
             };
@@ -479,6 +461,29 @@ mod tests {
         let results = search_by_name(&vault, "github").unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "GitHub Token");
+    }
+
+    #[test]
+    fn search_by_name_preserves_unicode_lowercase_substrings() {
+        let (mut vault, _storage) = test_vault();
+        create_entry(
+            &mut vault,
+            "Über-İD Account".to_owned(),
+            EntryData::Credential {
+                username: "u".to_owned(),
+                password: "p".to_owned(),
+                url: None,
+                notes: None,
+            },
+            vec![],
+        )
+        .unwrap();
+        for query in ["üBER", "i\u{307}d", "ACCOUNT", ""] {
+            let matches = search_by_name(&vault, query).unwrap();
+            assert_eq!(matches.len(), 1, "query {query:?}");
+            assert_eq!(matches[0].name, "Über-İD Account");
+        }
+        assert_eq!(search_by_name(&vault, "missing").unwrap().len(), 0);
     }
 
     #[test]
