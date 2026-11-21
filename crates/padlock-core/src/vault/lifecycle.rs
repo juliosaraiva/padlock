@@ -24,6 +24,7 @@ use crate::vault::format::{
     deserialize_index, parse_header, serialize_header, serialize_index, VaultHeader, VaultIndex,
     HEADER_SIZE,
 };
+use zeroize::Zeroizing;
 
 /// Vault lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -566,7 +567,7 @@ impl Vault {
     pub fn enable_recovery(
         &mut self,
         storage: &dyn StorageBackend,
-    ) -> crate::error::Result<String> {
+    ) -> crate::error::Result<Zeroizing<String>> {
         let kek = self.kek.as_ref().ok_or(Error::Vault(VaultError::Locked))?;
         let mackey = self
             .mackey

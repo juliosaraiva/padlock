@@ -3,9 +3,11 @@
 //! Recovers a vault using a recovery key when the passphrase is forgotten.
 //! After recovery, forces the user to set a new passphrase.
 
+use anyhow::Context;
 use clap::Args;
 use padlock_core::vault::lifecycle::{KdfParams, Vault};
 use padlock_core::vault::storage::FilesystemBackend;
+use zeroize::Zeroizing;
 
 use super::{prompt_passphrase, resolve_vault_path};
 
@@ -13,12 +15,8 @@ use super::{prompt_passphrase, resolve_vault_path};
 #[derive(Args)]
 pub struct RecoverCmd {
     /// Path to the vault file.
-    #[arg(
-        long,
-        env = "PADLOCK_VAULT",
-        default_value = "~/.padlock/vault.padlock"
-    )]
-    vault_path: String,
+    #[arg(long)]
+    vault_path: Option<String>,
 }
 
 /// Execute the recover command.
@@ -26,29 +24,29 @@ pub struct RecoverCmd {
 /// # Errors
 ///
 /// Returns an error if vault recovery fails.
-#[allow(clippy::needless_pass_by_value)]
-pub fn run(cmd: RecoverCmd) -> anyhow::Result<()> {
-    let path = resolve_vault_path(&cmd.vault_path);
+pub fn run(cmd: &RecoverCmd, vault_path: &str) -> anyhow::Result<()> {
+    let path = resolve_vault_path(cmd.vault_path.as_deref().unwrap_or(vault_path));
     if !path.exists() {
         anyhow::bail!("vault not found at {}", path.display());
     }
 
     let storage = FilesystemBackend::new(path);
 
-    let recovery_key = prompt_passphrase("Recovery key: ")?;
-    let recovery_key = recovery_key.trim();
-
-    let mut vault = Vault::recover(recovery_key, &storage)
-        .map_err(|e| anyhow::anyhow!("recovery failed: {e}"))?;
+    let mut vault = {
+        let recovery_key = Zeroizing::new(prompt_passphrase("Recovery key: ")?);
+        Vault::recover(recovery_key.trim(), &storage).context("recovery failed")?
+    };
 
     println!("Recovery successful. You must now set a new passphrase.");
 
-    let new_passphrase = prompt_passphrase("Enter new passphrase: ")?;
-    let confirm = prompt_passphrase("Confirm passphrase: ")?;
+    let new_passphrase = Zeroizing::new(prompt_passphrase("Enter new passphrase: ")?);
+    let confirm = Zeroizing::new(prompt_passphrase("Confirm passphrase: ")?);
 
-    if new_passphrase != confirm {
+    if *new_passphrase != *confirm {
         anyhow::bail!("passphrases do not match");
     }
+
+    drop(confirm);
 
     if new_passphrase.len() < 8 {
         anyhow::bail!("passphrase must be at least 8 characters");

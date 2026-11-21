@@ -64,7 +64,7 @@ pub fn run(cmd: InitCmd) -> anyhow::Result<()> {
         println!("IMPORTANT: Save this recovery key in a secure location.");
         println!("It will NOT be shown again.");
         println!();
-        println!("  {key}");
+        println!("  {}", key.as_str());
         println!();
         println!("If you forget your passphrase, run `padlock recover` and enter this key.");
     }

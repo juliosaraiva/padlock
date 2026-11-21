@@ -455,6 +455,41 @@ fn suspend_restores_echo_before_stopping_and_cancels_on_resume() {
 }
 
 #[test]
+fn recover_uses_selected_vault_and_preserves_typed_error() {
+    let dir = tempfile::tempdir().unwrap();
+    fixture(dir.path());
+    let (out, _) = run_cli(
+        &dir.path().join("fixture.vault"),
+        &["recover"],
+        None,
+        &[(b"Recovery key:", b"unused-synthetic-key\n")],
+    );
+    assert_eq!(out.status.code(), Some(6));
+    assert_eq!(out.stdout, [] as [u8; 0]);
+}
+
+#[test]
+fn recovery_json_rejected_before_prompt_or_write() {
+    use padlock_core::traits::storage::StorageBackend;
+    let dir = tempfile::tempdir().unwrap();
+    let storage = fixture(dir.path());
+    let before = storage.read_vault().unwrap();
+    for args in [
+        &["--json", "recover"][..],
+        &["--json", "recovery", "status"],
+        &["--json", "recovery", "enable"],
+        &["--json", "recovery", "disable"],
+    ] {
+        let (out, transcript) = run_cli(&dir.path().join("fixture.vault"), args, None, &[]);
+        assert_eq!(out.status.code(), Some(2));
+        assert_eq!(out.stdout, [] as [u8; 0]);
+        assert!(String::from_utf8_lossy(&out.stderr).contains("--json"));
+        assert_eq!(transcript, [] as [u8; 0]);
+        assert_eq!(storage.read_vault().unwrap(), before);
+    }
+}
+
+#[test]
 fn session_revocation_requires_positive_ack_in_both_scopes() {
     use padlock_core::session::protocol::{serialize_session_response, SessionResponse};
     use padlock_core::ssh_agent::{protocol::serialize_response, AgentResponse};
@@ -541,4 +576,47 @@ fn unlock_skips_unsafe_session_socket() {
     assert_eq!(value["session_created"], false);
     assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
     assert!(!dir.path().join("session.token").exists());
+}
+
+#[test]
+fn recovery_output_round_trips_and_mismatch_preserves_vault() {
+    use padlock_core::traits::storage::StorageBackend;
+
+    let dir = tempfile::tempdir().unwrap();
+    let storage = fixture(dir.path());
+    let path = dir.path().join("fixture.vault");
+    let (out, _) = run_cli(
+        &path,
+        &["recovery", "enable"],
+        None,
+        &[(b"Passphrase:", PASSPHRASE)],
+    );
+    assert!(out.status.success());
+    assert_eq!(out.stderr, [] as [u8; 0]);
+    let prose = String::from_utf8(out.stdout).unwrap();
+    let key = prose
+        .lines()
+        .find_map(|line| line.strip_prefix("  "))
+        .unwrap();
+    assert_eq!(key.split('-').count(), 8);
+    assert!(key.split('-').all(|group| group.len() == 8
+        && group
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_lowercase())));
+    assert!(Vault::recover(key, &storage).is_ok());
+    let key_input = format!("{key}\n");
+    let before = storage.read_vault().unwrap();
+    let (out, _) = run_cli(
+        &path,
+        &["recover"],
+        None,
+        &[
+            (b"Recovery key:", key_input.as_bytes()),
+            (b"Enter new passphrase:", b"new-test-passphrase\n"),
+            (b"Confirm passphrase:", b"different-test-passphrase\n"),
+        ],
+    );
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("passphrases do not match"));
+    assert_eq!(storage.read_vault().unwrap(), before);
 }

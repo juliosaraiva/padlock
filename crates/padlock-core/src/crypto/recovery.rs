@@ -59,9 +59,9 @@ pub fn generate_recovery_key() -> SecretBuf {
 /// Format: 8 groups of 8 hex characters separated by dashes.
 /// Example: `A1B2C3D4-E5F6A7B8-C9D0E1F2-A3B4C5D6-E7F8A9B0-C1D2E3F4-A5B6C7D8-E9F0A1B2`
 #[must_use]
-pub fn encode_recovery_key(key: &SecretBuf) -> String {
+pub fn encode_recovery_key(key: &SecretBuf) -> Zeroizing<String> {
     use std::fmt::Write;
-    let mut encoded = String::with_capacity(key.len() * 3);
+    let mut encoded = Zeroizing::new(String::with_capacity(key.len() * 3));
     for (index, byte) in key.iter().enumerate() {
         if index != 0 && index % 4 == 0 {
             encoded.push('-');

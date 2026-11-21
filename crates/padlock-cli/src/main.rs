@@ -38,6 +38,14 @@ fn main() {
             )
             .exit();
     }
+    if cli.json && matches!(&cli.command, Commands::Recover(_) | Commands::Recovery(_)) {
+        Cli::command()
+            .error(
+                ErrorKind::ArgumentConflict,
+                "--json is unsupported for recover and recovery",
+            )
+            .exit();
+    }
     if let Err(e) = run(cli) {
         let exit_code = determine_exit_code(&e);
         eprintln!("error: {e}");
@@ -91,7 +99,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Audit(cmd) => commands::audit::run(cmd, &cli.vault_path, &fmt),
         Commands::Config(cmd) => commands::config::run(cmd, &cli.vault_path, cli.json),
         Commands::Session(cmd) => commands::session::run(cmd, &cli.vault_path, cli.json),
-        Commands::Recover(cmd) => commands::recover::run(cmd),
+        Commands::Recover(cmd) => commands::recover::run(&cmd, &cli.vault_path),
         Commands::Recovery(cmd) => commands::recovery::run(cmd, &cli.vault_path, ns),
     }
 }
