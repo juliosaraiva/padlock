@@ -133,7 +133,8 @@ impl Deref for SecretBuf {
 
 impl Drop for SecretBuf {
     fn drop(&mut self) {
-        self.data.zeroize();
+        // Keep the slice length intact until the pages are unlocked.
+        self.data.as_mut_slice().zeroize();
         #[cfg(unix)]
         if self.locked {
             munlock_buffer(&self.data);

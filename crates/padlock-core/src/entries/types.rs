@@ -157,7 +157,7 @@ impl EntryData {
 }
 
 /// Additional metadata for an entry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct EntryMeta {
     /// Last time this entry was accessed.
     pub last_accessed: Option<i64>,

@@ -13,20 +13,28 @@ use crate::session::protocol::{
     SESSION_EXTENSION_NAME,
 };
 use crate::session::transit::{responder_derive_transit, transit_encrypt};
-use crate::session::types::{SessionAlgorithm, SessionDuration, SESSION_TOKEN_SIZE};
+use crate::session::types::{
+    SessionAlgorithm, SessionDuration, DEFAULT_IDLE_TIMEOUT, SESSION_TOKEN_SIZE,
+};
 use crate::ssh_agent::protocol::{AgentMessage, AgentResponse};
 use crate::traits::session::SessionManager;
 
 /// An SSH key identity loaded in the agent.
-#[derive(Debug, Clone)]
+///
+/// Private key bytes are zeroized on drop to prevent key material
+/// from lingering in deallocated heap memory.
+#[derive(Debug, Clone, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct LoadedKey {
     /// The public key blob in OpenSSH wire format.
+    #[zeroize(skip)]
     pub public_key_blob: Vec<u8>,
     /// Human-readable comment for the key.
+    #[zeroize(skip)]
     pub comment: String,
-    /// The private key bytes (used for signing, zeroized after).
+    /// The private key bytes (used for signing). Zeroized on drop.
     pub private_key_bytes: Vec<u8>,
     /// The key type string (e.g., "ssh-ed25519").
+    #[zeroize(skip)]
     pub key_type: String,
 }
 
@@ -101,7 +109,7 @@ impl AgentHandler {
 
     /// Handle an incoming agent message and produce a response.
     #[must_use]
-    pub fn handle_message(&self, message: &AgentMessage) -> AgentResponse {
+    pub fn handle_message(&self, message: &AgentMessage<'_>) -> AgentResponse {
         match message {
             AgentMessage::RequestIdentities => {
                 let keys = self
@@ -116,18 +124,22 @@ impl AgentHandler {
                 data,
                 flags: _,
             } => self.handle_sign_request(key_blob, data),
-            // Keys come from the vault and are managed via CLI.
-            AgentMessage::AddIdentity { .. }
-            | AgentMessage::RemoveIdentity { .. }
-            | AgentMessage::RemoveAllIdentities
-            | AgentMessage::Unknown(_) => AgentResponse::Failure,
+            AgentMessage::AddIdentity { .. } => {
+                // External key addition is not supported -- keys come from the vault.
+                AgentResponse::Failure
+            }
+            AgentMessage::RemoveIdentity { .. } | AgentMessage::RemoveAllIdentities => {
+                // Removal via protocol not supported; use CLI commands.
+                AgentResponse::Failure
+            }
             AgentMessage::Extension { name, payload } => {
                 if name == SESSION_EXTENSION_NAME {
-                    self.handle_session_extension(payload)
+                    self.handle_session_extension(payload.as_bytes())
                 } else {
                     AgentResponse::Failure
                 }
             }
+            AgentMessage::Unknown(_) => AgentResponse::Failure,
         }
     }
 
@@ -142,7 +154,7 @@ impl AgentHandler {
         };
 
         match request {
-            SessionRequest::Create(req) => Self::handle_session_create(store, req),
+            SessionRequest::Create(req) => Self::handle_session_create(store, &req),
             SessionRequest::Resume(req) => Self::handle_session_resume(store, req),
             SessionRequest::Destroy(req) => Self::handle_session_destroy(store, req),
             SessionRequest::Status(req) => Self::handle_session_status(store, req),
@@ -156,7 +168,7 @@ impl AgentHandler {
     /// Unix socket. The socket is secured by filesystem permissions (0o600),
     /// which restricts access to the same user. Transit encryption is only
     /// used for the `ResumeSession` response path (daemon→CLI).
-    fn handle_session_create(store: &SessionStore, req: CreateSessionRequest) -> AgentResponse {
+    fn handle_session_create(store: &SessionStore, req: &CreateSessionRequest) -> AgentResponse {
         // Validate algorithm
         let Some(algorithm) = SessionAlgorithm::from_byte(req.algorithm) else {
             return AgentResponse::Failure;
@@ -168,16 +180,27 @@ impl AgentHandler {
         };
 
         // Validate vault_id
-        let Ok(vault_id) = <[u8; 16]>::try_from(req.vault_id) else {
-            return AgentResponse::Failure;
+        let vault_id: [u8; 16] = match req.vault_id.as_slice().try_into() {
+            Ok(v) => v,
+            Err(_) => return AgentResponse::Failure,
         };
 
-        // Accept KEK and MACKEY directly (transport secured by socket permissions)
-        let kek = crate::crypto::secret_buf::SecretBuf::from_bytes(&req.encrypted_kek);
-        let mackey = crate::crypto::secret_buf::SecretBuf::from_bytes(&req.encrypted_mackey);
+        // Parse idle timeout from request, falling back to default
+        let idle_timeout = if req.idle_timeout_secs > 0 {
+            std::time::Duration::from_secs(req.idle_timeout_secs)
+        } else {
+            DEFAULT_IDLE_TIMEOUT
+        };
 
         // Create session
-        let Ok(token) = store.create_session(&kek, &mackey, &vault_id, duration, algorithm) else {
+        let Ok(token) = store.create_session(
+            &req.encrypted_kek,
+            &req.encrypted_mackey,
+            &vault_id,
+            duration,
+            idle_timeout,
+            algorithm,
+        ) else {
             return AgentResponse::Failure;
         };
 
@@ -195,13 +218,15 @@ impl AgentHandler {
     /// Handle a `ResumeSession` request.
     fn handle_session_resume(store: &SessionStore, req: ResumeSessionRequest) -> AgentResponse {
         // Validate token
-        let Ok(token) = <[u8; SESSION_TOKEN_SIZE]>::try_from(req.token) else {
-            return AgentResponse::Failure;
+        let token: [u8; SESSION_TOKEN_SIZE] = match req.token.try_into() {
+            Ok(t) => t,
+            Err(_) => return AgentResponse::Failure,
         };
 
         // Validate ephemeral pubkey
-        let Ok(initiator_pubkey) = <[u8; 32]>::try_from(req.ephemeral_pubkey) else {
-            return AgentResponse::Failure;
+        let initiator_pubkey: [u8; 32] = match req.ephemeral_pubkey.try_into() {
+            Ok(pk) => pk,
+            Err(_) => return AgentResponse::Failure,
         };
 
         // Resume session to get KEK + MACKEY
@@ -241,8 +266,9 @@ impl AgentHandler {
 
     /// Handle a `DestroySession` request.
     fn handle_session_destroy(store: &SessionStore, req: DestroySessionRequest) -> AgentResponse {
-        let Ok(token) = <[u8; SESSION_TOKEN_SIZE]>::try_from(req.token) else {
-            return AgentResponse::Failure;
+        let token: [u8; SESSION_TOKEN_SIZE] = match req.token.try_into() {
+            Ok(t) => t,
+            Err(_) => return AgentResponse::Failure,
         };
 
         match store.destroy_session(&token) {
@@ -256,8 +282,9 @@ impl AgentHandler {
 
     /// Handle a `SessionStatus` request.
     fn handle_session_status(store: &SessionStore, req: StatusSessionRequest) -> AgentResponse {
-        let Ok(token) = <[u8; SESSION_TOKEN_SIZE]>::try_from(req.token) else {
-            return AgentResponse::Failure;
+        let token: [u8; SESSION_TOKEN_SIZE] = match req.token.try_into() {
+            Ok(t) => t,
+            Err(_) => return AgentResponse::Failure,
         };
 
         match store.session_status(&token) {
@@ -299,8 +326,6 @@ impl AgentHandler {
     }
 
     /// Sign data using an Ed25519 key.
-    // Preserve existing integer conversion semantics. Bounds changes need separate review.
-    #[allow(clippy::cast_possible_truncation)]
     fn sign_ed25519(key: &LoadedKey, data: &[u8]) -> AgentResponse {
         use ed25519_dalek::{Signer, SigningKey};
 
@@ -309,8 +334,9 @@ impl AgentHandler {
         }
 
         // Ed25519 signing key is the first 32 bytes
-        let Ok(key_bytes) = <[u8; 32]>::try_from(&key.private_key_bytes[..32]) else {
-            return AgentResponse::Failure;
+        let key_bytes: [u8; 32] = match key.private_key_bytes[..32].try_into() {
+            Ok(b) => b,
+            Err(_) => return AgentResponse::Failure,
         };
 
         let signing_key = SigningKey::from_bytes(&key_bytes);
@@ -320,9 +346,17 @@ impl AgentHandler {
         let sig_type = b"ssh-ed25519";
         let sig_bytes = signature.to_bytes();
         let mut blob = Vec::new();
-        blob.extend_from_slice(&(sig_type.len() as u32).to_be_bytes());
+        blob.extend_from_slice(
+            &u32::try_from(sig_type.len())
+                .expect("sig_type length fits in u32")
+                .to_be_bytes(),
+        );
         blob.extend_from_slice(sig_type);
-        blob.extend_from_slice(&(sig_bytes.len() as u32).to_be_bytes());
+        blob.extend_from_slice(
+            &u32::try_from(sig_bytes.len())
+                .expect("sig_bytes length fits in u32")
+                .to_be_bytes(),
+        );
         blob.extend_from_slice(&sig_bytes);
 
         AgentResponse::SignResponse { signature: blob }
@@ -334,8 +368,6 @@ mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
 
-    // Preserve existing integer conversion semantics. Bounds changes need separate review.
-    #[allow(clippy::cast_possible_truncation)]
     fn make_test_key() -> LoadedKey {
         let signing_key = SigningKey::from_bytes(&[42u8; 32]);
         let verifying_key = signing_key.verifying_key();
@@ -344,9 +376,17 @@ mod tests {
         let key_type = b"ssh-ed25519";
         let pk_bytes = verifying_key.as_bytes();
         let mut blob = Vec::new();
-        blob.extend_from_slice(&(key_type.len() as u32).to_be_bytes());
+        blob.extend_from_slice(
+            &u32::try_from(key_type.len())
+                .expect("fits in u32")
+                .to_be_bytes(),
+        );
         blob.extend_from_slice(key_type);
-        blob.extend_from_slice(&(pk_bytes.len() as u32).to_be_bytes());
+        blob.extend_from_slice(
+            &u32::try_from(pk_bytes.len())
+                .expect("fits in u32")
+                .to_be_bytes(),
+        );
         blob.extend_from_slice(pk_bytes);
 
         LoadedKey {

@@ -106,6 +106,13 @@ pub enum CryptoError {
     /// Memory locking operation failed.
     #[error("memory lock failed: {0}")]
     MemoryLockFailed(String),
+
+    /// The provided data has invalid encoding.
+    #[error("invalid encoding: {reason}")]
+    InvalidEncoding {
+        /// Description of the encoding violation.
+        reason: String,
+    },
 }
 
 /// Errors from vault operations.
@@ -171,6 +178,10 @@ pub enum VaultError {
         /// Description of the write failure.
         reason: String,
     },
+
+    /// Recovery is not enabled for this vault.
+    #[error("recovery is not enabled for this vault")]
+    RecoveryNotEnabled,
 }
 
 /// Errors from entry operations.

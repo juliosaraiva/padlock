@@ -27,12 +27,13 @@ pub struct AuditCmd {
 
 /// Run the audit command.
 ///
-/// # Errors
-/// Returns an error if a filter is invalid or the audit log cannot be opened or read.
-///
 /// # Panics
-/// Panics if the vault path has no parent and the home directory is unavailable.
-// Keep ownership at the command dispatch boundary.
+///
+/// Panics if the home directory cannot be determined.
+///
+/// # Errors
+///
+/// Returns an error if audit log reading or filtering fails.
 #[allow(clippy::needless_pass_by_value)]
 pub fn run(cmd: AuditCmd, vault_path: &str, fmt: &OutputFormatter) -> anyhow::Result<()> {
     let padlock_dir = super::resolve_vault_path(vault_path).parent().map_or_else(
@@ -44,7 +45,7 @@ pub fn run(cmd: AuditCmd, vault_path: &str, fmt: &OutputFormatter) -> anyhow::Re
     let log = JsonLinesAuditLog::new(&audit_path)?;
     let events = log.read_events()?;
 
-    let cutoff = parse_since(cmd.since.as_deref())?;
+    let cutoff = parse_since(&cmd.since)?;
     let action_filter = cmd.action.as_deref().map(parse_action).transpose()?;
 
     let filtered: Vec<&AuditEvent> = events
@@ -108,15 +109,14 @@ pub fn run(cmd: AuditCmd, vault_path: &str, fmt: &OutputFormatter) -> anyhow::Re
 }
 
 /// Parse a duration string like "1h", "24h", "7d" into an epoch-seconds cutoff.
-fn parse_since(since: Option<&str>) -> anyhow::Result<Option<i64>> {
-    let Some(since) = since else {
-        return Ok(None);
-    };
+#[allow(clippy::ref_option)]
+fn parse_since(since: &Option<String>) -> anyhow::Result<Option<i64>> {
+    let Some(since) = since else { return Ok(None) };
 
     let (num_str, multiplier) = if let Some(n) = since.strip_suffix('d') {
-        (n, 86_400i64)
+        (n, 86400i64)
     } else if let Some(n) = since.strip_suffix('h') {
-        (n, 3_600i64)
+        (n, 3600i64)
     } else if let Some(n) = since.strip_suffix('m') {
         (n, 60i64)
     } else {
@@ -198,17 +198,17 @@ mod tests {
 
     #[test]
     fn test_parse_since_hours() {
-        let result = parse_since(Some("24h")).unwrap();
+        let result = parse_since(&Some("24h".to_string())).unwrap();
         assert!(result.is_some());
         let cutoff = result.unwrap();
         let now = chrono::Utc::now().timestamp();
         // Should be approximately 24 hours ago
-        assert!((now - cutoff - 86_400).abs() < 2);
+        assert!((now - cutoff - 86400).abs() < 2);
     }
 
     #[test]
     fn test_parse_since_days() {
-        let result = parse_since(Some("7d")).unwrap();
+        let result = parse_since(&Some("7d".to_string())).unwrap();
         assert!(result.is_some());
         let cutoff = result.unwrap();
         let now = chrono::Utc::now().timestamp();
@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn test_parse_since_minutes() {
-        let result = parse_since(Some("30m")).unwrap();
+        let result = parse_since(&Some("30m".to_string())).unwrap();
         assert!(result.is_some());
         let cutoff = result.unwrap();
         let now = chrono::Utc::now().timestamp();
@@ -226,13 +226,13 @@ mod tests {
 
     #[test]
     fn test_parse_since_none() {
-        let result = parse_since(None).unwrap();
+        let result = parse_since(&None).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn test_parse_since_invalid() {
-        let result = parse_since(Some("abc"));
+        let result = parse_since(&Some("abc".to_string()));
         assert!(result.is_err());
     }
 

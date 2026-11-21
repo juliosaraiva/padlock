@@ -6,10 +6,14 @@
 //!
 //! # Parameters
 //!
-//! Production parameters (tuned for ~2-3 second derivation):
-//! - Memory: 1 GiB (1,048,576 KiB)
-//! - Time cost: 2 iterations
+//! Production parameters (tuned for ~500ms-1s in release builds):
+//! - Memory: 256 MiB (262,144 KiB)
+//! - Time cost: 3 iterations
 //! - Parallelism: 4 threads
+//!
+//! These parameters are well above OWASP recommendations (46 MiB minimum)
+//! and above industry norms (`KeePassXC`: 64 MiB, `1Password`: ~100 MiB).
+//! The higher iteration count compensates for the reduced memory cost.
 //!
 //! Test parameters (fast, for unit tests):
 //! - Memory: 64 KiB
@@ -28,11 +32,11 @@ pub const SALT_LENGTH: usize = 16;
 /// Output key length for PDK in bytes (256 bits).
 pub const PDK_LENGTH: usize = 32;
 
-/// Argon2id memory cost in KiB for production (1 GiB).
-pub const ARGON2_MEMORY_KIB: u32 = 1_048_576;
+/// Argon2id memory cost in KiB for production (256 MiB).
+pub const ARGON2_MEMORY_KIB: u32 = 262_144;
 
 /// Argon2id time cost (iterations) for production.
-pub const ARGON2_TIME_COST: u32 = 2;
+pub const ARGON2_TIME_COST: u32 = 3;
 
 /// Argon2id parallelism (threads) for production.
 pub const ARGON2_PARALLELISM: u32 = 4;
@@ -46,11 +50,42 @@ const TEST_ARGON2_TIME_COST: u32 = 1;
 /// Argon2id parallelism for testing.
 const TEST_ARGON2_PARALLELISM: u32 = 1;
 
+// Preserve the alpha and current production profiles while bounding unauthenticated work.
+const MAX_MEMORY_KIB: u32 = 1_048_576;
+const MAX_TIME_COST: u32 = 4;
+const MAX_PARALLELISM: u32 = 4;
+const MAX_MEMORY_PASSES: u32 = 2 * MAX_MEMORY_KIB;
+
+pub(crate) fn validated_params(
+    memory_kib: u32,
+    time_cost: u32,
+    parallelism: u32,
+) -> Result<Params> {
+    if memory_kib == 0 || time_cost == 0 || parallelism == 0 {
+        return Err(Error::Crypto(CryptoError::Argon2Error(
+            "parameters must all be nonzero".to_owned(),
+        )));
+    }
+
+    if memory_kib > MAX_MEMORY_KIB
+        || time_cost > MAX_TIME_COST
+        || parallelism > MAX_PARALLELISM
+        || memory_kib.saturating_mul(time_cost) > MAX_MEMORY_PASSES
+    {
+        return Err(Error::Crypto(CryptoError::Argon2Error(
+            "parameters exceed Padlock resource limits".to_owned(),
+        )));
+    }
+
+    Params::new(memory_kib, time_cost, parallelism, Some(PDK_LENGTH))
+        .map_err(|e| Error::Crypto(CryptoError::Argon2Error(e.to_string())))
+}
+
 /// Derive the Primary Derivation Key (PDK) from a passphrase and salt.
 ///
 /// Uses Argon2id with memory-hard parameters to produce a 256-bit key.
-/// In production, this operation intentionally takes approximately 2-3
-/// seconds to complete, making brute-force attacks impractical.
+/// In production, this operation intentionally takes approximately 500ms-1s
+/// in release builds, making brute-force attacks impractical.
 ///
 /// # Arguments
 ///
@@ -94,8 +129,7 @@ pub fn derive_pdk_with_params(
         }));
     }
 
-    let params = Params::new(memory_kib, time_cost, parallelism, Some(PDK_LENGTH))
-        .map_err(|e| Error::Crypto(CryptoError::Argon2Error(e.to_string())))?;
+    let params = validated_params(memory_kib, time_cost, parallelism)?;
 
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
