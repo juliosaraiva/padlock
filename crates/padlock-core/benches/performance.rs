@@ -63,6 +63,15 @@ fn make_vault_with_entries(count: usize) -> (Vault, InMemStorage) {
         create_entry(&mut vault, name, data, tags).unwrap();
     }
 
+    vault.write_to_storage(&storage).unwrap();
+    assert_eq!(
+        Vault::open("bench-pass", &storage, &test_params())
+            .unwrap()
+            .index()
+            .active_count(),
+        count,
+        "persisted benchmark fixture entry count"
+    );
     (vault, storage)
 }
 
