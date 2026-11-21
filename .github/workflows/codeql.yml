@@ -1,0 +1,216 @@
+name: CodeQL
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    # Scan the setup branch to verify push SARIF before enabling scans on main.
+    branches: [main, security/codeql-rust]
+
+permissions: {}
+
+jobs:
+  rust:
+    name: Analyze Rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      artifact-id: ${{ steps.push-sarif.outputs.artifact-id }}
+    steps:
+      # The pull_request event checks out GitHub's synthetic merge commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4
+        with:
+          languages: rust
+          build-mode: none
+      - uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4
+        with:
+          category: /language:rust
+          # PR events can submit SARIF with a read-only token. Pushes upload
+          # from a fresh job because Rust extraction can run build.rs.
+          upload: ${{ github.event_name == 'pull_request' && 'always' || 'never' }}
+          upload-database: false
+          output: ${{ runner.temp }}/codeql-results
+      - name: Pass push SARIF to upload job
+        id: push-sarif
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: rust-codeql-sarif-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codeql-results/rust.sarif
+          if-no-files-found: error
+          retention-days: 1
+
+  upload-push:
+    name: Upload Rust SARIF
+    if: >-
+      github.event_name == 'push' && !github.event.deleted &&
+      github.repository == 'juliosaraiva/padlock' &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner &&
+      ((github.ref == 'refs/heads/main' && github.ref_protected) ||
+       github.ref == 'refs/heads/security/codeql-rust')
+    needs: rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      security-events: write
+    steps:
+      # This job never checks out source or executes anything from the archive.
+      - name: Verify and extract exact-run Rust SARIF
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_ARTIFACT_ID: ${{ needs.rust.outputs.artifact-id }}
+        run: |
+          python3 - <<'PYTHON'
+          import hashlib
+          import io
+          import json
+          import os
+          import re
+          import stat
+          import subprocess
+          import zipfile
+          from datetime import datetime
+          from pathlib import Path
+
+          MAX_ARCHIVE_BYTES = 10 * 1024 * 1024
+          MAX_SARIF_BYTES = 20 * 1024 * 1024
+          PAYLOAD = "rust.sarif"
+
+          def require(condition, reason):
+              if not condition:
+                  raise SystemExit(reason)
+
+          def api(path):
+              return json.loads(subprocess.check_output(["gh", "api", path]))
+
+          def artifact_for_attempt(response, name, repo_id, run_id, branch, sha):
+              artifacts = response["artifacts"]
+              require(response["total_count"] == len(artifacts) == 1, "Expected one exact-attempt artifact")
+              artifact = artifacts[0]
+              require(artifact["name"] == name and not artifact["expired"], "Wrong or expired artifact")
+              provenance = artifact["workflow_run"]
+              require(
+                  provenance["id"] == run_id
+                  and provenance["repository_id"] == provenance["head_repository_id"] == repo_id
+                  and provenance["head_branch"] == branch
+                  and provenance["head_sha"] == sha,
+                  "Artifact run, repository, branch or SHA mismatch",
+              )
+              require(type(artifact["id"]) is int and artifact["id"] > 0, "Invalid artifact ID")
+              require(0 < artifact["size_in_bytes"] <= MAX_ARCHIVE_BYTES, "Archive size out of bounds")
+              require(
+                  re.fullmatch(r"sha256:[0-9a-f]{64}", artifact["digest"] or ""),
+                  "Missing or invalid archive digest",
+              )
+              return artifact
+
+          def verify_producer(response, artifact, handoff_id, run_id, attempt, sha):
+              require(str(artifact["id"]) == handoff_id, "Artifact does not match producer handoff")
+              jobs = response["jobs"]
+              require(len(jobs) == response["total_count"], "Incomplete attempt jobs")
+              producers = [job for job in jobs if job["name"] == "Analyze Rust"]
+              require(len(producers) == 1, "Expected one extractor in the current attempt")
+              job = producers[0]
+              require(
+                  job["run_id"] == run_id and job["run_attempt"] == attempt
+                  and job["head_sha"] == sha and job["conclusion"] == "success",
+                  "Extractor did not succeed in the current attempt",
+              )
+              steps = [step for step in job["steps"] if step["name"] == "Pass push SARIF to upload job"]
+              require(len(steps) == 1 and steps[0]["conclusion"] == "success", "No successful artifact handoff")
+              step = steps[0]
+              job_start = datetime.fromisoformat(job["started_at"])
+              job_end = datetime.fromisoformat(job["completed_at"])
+              step_start = datetime.fromisoformat(step["started_at"])
+              step_end = datetime.fromisoformat(step["completed_at"])
+              created = datetime.fromisoformat(artifact["created_at"])
+              require(
+                  job_start <= step_start <= created <= step_end <= job_end,
+                  "Artifact was not created during the current attempt's handoff",
+              )
+
+          def verified_payload(archive, artifact):
+              require(len(archive) == artifact["size_in_bytes"], "Archive size mismatch")
+              require(
+                  "sha256:" + hashlib.sha256(archive).hexdigest() == artifact["digest"],
+                  "Archive digest mismatch",
+              )
+              with zipfile.ZipFile(io.BytesIO(archive)) as zipped:
+                  entries = zipped.infolist()
+                  require(len(entries) == 1, "Expected exactly one SARIF entry")
+                  entry = entries[0]
+                  require(
+                      entry.orig_filename == PAYLOAD and stat.S_ISREG(entry.external_attr >> 16),
+                      "Expected regular rust.sarif at archive root",
+                  )
+                  require(0 < entry.file_size <= MAX_SARIF_BYTES, "SARIF size out of bounds")
+                  with zipped.open(entry) as source:
+                      payload = source.read(MAX_SARIF_BYTES + 1)
+              require(len(payload) == entry.file_size, "SARIF size mismatch")
+              sarif = json.loads(payload)
+              runs = sarif.get("runs", [])
+              require(
+                  sarif.get("version") == "2.1.0" and len(runs) == 1
+                  and runs[0].get("tool", {}).get("driver", {}).get("name") == "CodeQL",
+                  "Expected one CodeQL SARIF 2.1.0 run",
+              )
+              return payload
+
+          def main():
+              repo = os.environ["GITHUB_REPOSITORY"]
+              repo_id = int(os.environ["GITHUB_REPOSITORY_ID"])
+              run_id = int(os.environ["GITHUB_RUN_ID"])
+              attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
+              ref = os.environ["GITHUB_REF"]
+              sha = os.environ["GITHUB_SHA"]
+              branch = ref.removeprefix("refs/heads/")
+              event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+              require(
+                  os.environ["GITHUB_EVENT_NAME"] == "push"
+                  and not event["deleted"] and event["ref"] == ref and event["after"] == sha
+                  and event["repository"]["id"] == repo_id,
+                  "Push event does not match runner context",
+              )
+              base = f"repos/{repo}/actions"
+              run = api(f"{base}/runs/{run_id}/attempts/{attempt}")
+              require(
+                  run["id"] == run_id and run["run_attempt"] == attempt and run["event"] == "push"
+                  and run["repository"]["id"] == run["head_repository"]["id"] == repo_id
+                  and run["head_branch"] == branch and run["head_sha"] == sha
+                  and run["path"] == ".github/workflows/codeql.yml",
+                  "Run attempt does not match this push",
+              )
+              name = f"rust-codeql-sarif-{run_id}-{attempt}"
+              response = api(f"{base}/runs/{run_id}/artifacts?name={name}&per_page=2")
+              artifact = artifact_for_attempt(response, name, repo_id, run_id, branch, sha)
+              jobs = api(f"{base}/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
+              verify_producer(jobs, artifact, os.environ["PRODUCER_ARTIFACT_ID"], run_id, attempt, sha)
+              with subprocess.Popen(
+                  ["gh", "api", f"{base}/artifacts/{artifact['id']}/zip"], stdout=subprocess.PIPE,
+              ) as download:
+                  archive = download.stdout.read(MAX_ARCHIVE_BYTES + 1)
+                  if len(archive) > MAX_ARCHIVE_BYTES:
+                      download.kill()
+                  require(download.wait() == 0, "Artifact download failed or exceeded limit")
+              payload = verified_payload(archive, artifact)
+              output = Path(os.environ["RUNNER_TEMP"]) / PAYLOAD
+              with output.open("xb") as target:
+                  target.write(payload)
+              print(f"Verified artifact {artifact['id']} for run {run_id}/{attempt}, {ref} at {sha}")
+
+          if __name__ == "__main__":
+              main()
+          PYTHON
+      - uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4
+        with:
+          sarif_file: ${{ runner.temp }}/rust.sarif
+          ref: ${{ github.ref }}
+          sha: ${{ github.sha }}
+          category: /language:rust
