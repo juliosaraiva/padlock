@@ -16,6 +16,8 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+    outputs:
+      artifact-id: ${{ steps.push-sarif.outputs.artifact-id }}
     steps:
       # The pull_request event checks out GitHub's synthetic merge commit.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -34,6 +36,7 @@ jobs:
           upload-database: false
           output: ${{ runner.temp }}/codeql-results
       - name: Pass push SARIF to upload job
+        id: push-sarif
         if: github.event_name == 'push'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -47,10 +50,10 @@ jobs:
     if: >-
       github.event_name == 'push' && !github.event.deleted &&
       github.repository == 'juliosaraiva/padlock' &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner &&
       ((github.ref == 'refs/heads/main' && github.ref_protected) ||
-       (github.ref == 'refs/heads/security/codeql-rust' &&
-        github.actor == github.repository_owner &&
-        github.triggering_actor == github.repository_owner))
+       github.ref == 'refs/heads/security/codeql-rust')
     needs: rust
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -62,6 +65,7 @@ jobs:
       - name: Verify and extract exact-run Rust SARIF
         env:
           GH_TOKEN: ${{ github.token }}
+          PRODUCER_ARTIFACT_ID: ${{ needs.rust.outputs.artifact-id }}
         run: |
           python3 - <<'PYTHON'
           import hashlib
@@ -72,6 +76,7 @@ jobs:
           import stat
           import subprocess
           import zipfile
+          from datetime import datetime
           from pathlib import Path
 
           MAX_ARCHIVE_BYTES = 10 * 1024 * 1024
@@ -105,6 +110,31 @@ jobs:
                   "Missing or invalid archive digest",
               )
               return artifact
+
+          def verify_producer(response, artifact, handoff_id, run_id, attempt, sha):
+              require(str(artifact["id"]) == handoff_id, "Artifact does not match producer handoff")
+              jobs = response["jobs"]
+              require(len(jobs) == response["total_count"], "Incomplete attempt jobs")
+              producers = [job for job in jobs if job["name"] == "Analyze Rust"]
+              require(len(producers) == 1, "Expected one extractor in the current attempt")
+              job = producers[0]
+              require(
+                  job["run_id"] == run_id and job["run_attempt"] == attempt
+                  and job["head_sha"] == sha and job["conclusion"] == "success",
+                  "Extractor did not succeed in the current attempt",
+              )
+              steps = [step for step in job["steps"] if step["name"] == "Pass push SARIF to upload job"]
+              require(len(steps) == 1 and steps[0]["conclusion"] == "success", "No successful artifact handoff")
+              step = steps[0]
+              job_start = datetime.fromisoformat(job["started_at"])
+              job_end = datetime.fromisoformat(job["completed_at"])
+              step_start = datetime.fromisoformat(step["started_at"])
+              step_end = datetime.fromisoformat(step["completed_at"])
+              created = datetime.fromisoformat(artifact["created_at"])
+              require(
+                  job_start <= step_start <= created <= step_end <= job_end,
+                  "Artifact was not created during the current attempt's handoff",
+              )
 
           def verified_payload(archive, artifact):
               require(len(archive) == artifact["size_in_bytes"], "Archive size mismatch")
@@ -160,6 +190,8 @@ jobs:
               name = f"rust-codeql-sarif-{run_id}-{attempt}"
               response = api(f"{base}/runs/{run_id}/artifacts?name={name}&per_page=2")
               artifact = artifact_for_attempt(response, name, repo_id, run_id, branch, sha)
+              jobs = api(f"{base}/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
+              verify_producer(jobs, artifact, os.environ["PRODUCER_ARTIFACT_ID"], run_id, attempt, sha)
               with subprocess.Popen(
                   ["gh", "api", f"{base}/artifacts/{artifact['id']}/zip"], stdout=subprocess.PIPE,
               ) as download:
