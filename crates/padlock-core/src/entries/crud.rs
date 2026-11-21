@@ -19,8 +19,7 @@ use crate::vault::lifecycle::Vault;
 ///
 /// Returns `VaultError::Locked` if the vault is not unlocked.
 /// Returns `EntryError::AlreadyExists` if an entry with the same name exists.
-// Preserve existing integer conversion semantics. Bounds changes need separate review.
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[allow(clippy::needless_pass_by_value)]
 pub fn create_entry(
     vault: &mut Vault,
     name: String,
@@ -43,17 +42,14 @@ pub fn create_entry(
     let serialized = serialize_entry(&entry)?;
     let encrypted = crate::vault::entries::encrypt_entry(&serialized, kek)?;
 
-    // Append to entries blob
-    let mut blob = vault.entries_blob().to_vec();
-    let offset = blob.len() as u64;
-    let length = encrypted.len() as u32;
-    blob.extend_from_slice(&encrypted);
-    vault.set_entries_blob(blob)?;
+    // Append to entries blob in place (avoids full-blob copy)
+    let (offset, length) = vault.append_to_entries_blob(&encrypted)?;
 
     // Update index
-    let now = Timestamp::now().as_epoch_secs() as u64;
+    let now = u64::try_from(Timestamp::now().as_epoch_secs()).unwrap_or(0);
     let uuid = *entry.id.as_bytes();
-    vault.index_mut()?.entries.insert(
+    let index = vault.index_mut()?;
+    index.entries.insert(
         uuid,
         EntryMetadata {
             uuid,
@@ -63,6 +59,7 @@ pub fn create_entry(
             modified_at: now,
             deleted: false,
             title: name,
+            tags: Vec::new(),
         },
     );
 
@@ -77,8 +74,6 @@ pub fn create_entry(
 ///
 /// Returns `EntryError::NotFound` if the entry does not exist.
 /// Returns `VaultError::Locked` if the vault is not unlocked.
-// Preserve existing integer conversion semantics. Bounds changes need separate review.
-#[allow(clippy::cast_possible_truncation)]
 pub fn read_entry(vault: &Vault, id: &EntryId) -> crate::error::Result<Entry> {
     let kek = vault.kek()?;
     let uuid = *id.as_bytes();
@@ -90,16 +85,14 @@ pub fn read_entry(vault: &Vault, id: &EntryId) -> crate::error::Result<Entry> {
         .filter(|m| !m.deleted)
         .ok_or_else(|| Error::Entry(EntryError::NotFound { id: id.to_string() }))?;
 
-    let offset = meta.entry_offset as usize;
-    let length = meta.entry_length as usize;
-    let blob = vault.entries_blob();
-
-    if offset + length > blob.len() {
-        return Err(Error::Vault(VaultError::CorruptedData));
-    }
-
-    let encrypted = &blob[offset..offset + length];
-    let decrypted = crate::vault::entries::decrypt_entry(encrypted, kek)?;
+    let offset =
+        usize::try_from(meta.entry_offset).map_err(|_| Error::Vault(VaultError::CorruptedData))?;
+    let encrypted = vault
+        .entries_blob()
+        .get(offset..)
+        .and_then(|bytes| bytes.get(..meta.entry_length as usize))
+        .ok_or(Error::Vault(VaultError::CorruptedData))?;
+    let decrypted = zeroize::Zeroizing::new(crate::vault::entries::decrypt_entry(encrypted, kek)?);
     deserialize_entry(&decrypted)
 }
 
@@ -111,8 +104,6 @@ pub fn read_entry(vault: &Vault, id: &EntryId) -> crate::error::Result<Entry> {
 ///
 /// Returns `EntryError::NotFound` if the entry does not exist.
 /// Returns `VaultError::Locked` if the vault is not unlocked.
-// Preserve existing integer conversion semantics. Bounds changes need separate review.
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn update_entry(
     vault: &mut Vault,
     id: &EntryId,
@@ -128,19 +119,15 @@ pub fn update_entry(
     let serialized = serialize_entry(&entry)?;
     let encrypted = crate::vault::entries::encrypt_entry(&serialized, kek)?;
 
-    // Append new version to blob (old data becomes dead space)
-    let mut blob = vault.entries_blob().to_vec();
-    let offset = blob.len() as u64;
-    let length = encrypted.len() as u32;
-    blob.extend_from_slice(&encrypted);
-    vault.set_entries_blob(blob)?;
+    // Append new version to blob in place (old data becomes dead space)
+    let (offset, length) = vault.append_to_entries_blob(&encrypted)?;
 
     // Update index
     let uuid = *id.as_bytes();
     if let Some(meta) = vault.index_mut()?.entries.get_mut(&uuid) {
         meta.entry_offset = offset;
         meta.entry_length = length;
-        meta.modified_at = Timestamp::now().as_epoch_secs() as u64;
+        meta.modified_at = u64::try_from(Timestamp::now().as_epoch_secs()).unwrap_or(0);
     }
 
     Ok(entry)
@@ -155,20 +142,19 @@ pub fn update_entry(
 ///
 /// Returns `EntryError::NotFound` if the entry does not exist.
 /// Returns `VaultError::Locked` if the vault is not unlocked.
-// Preserve existing integer conversion semantics. Bounds changes need separate review.
-#[allow(clippy::cast_sign_loss)]
 pub fn delete_entry(vault: &mut Vault, id: &EntryId) -> crate::error::Result<()> {
     let uuid = *id.as_bytes();
 
-    let meta = vault
-        .index_mut()?
+    let index = vault.index_mut()?;
+    let meta = index
         .entries
         .get_mut(&uuid)
         .filter(|m| !m.deleted)
         .ok_or_else(|| Error::Entry(EntryError::NotFound { id: id.to_string() }))?;
 
     meta.deleted = true;
-    meta.modified_at = Timestamp::now().as_epoch_secs() as u64;
+    meta.modified_at = u64::try_from(Timestamp::now().as_epoch_secs()).unwrap_or(0);
+
     Ok(())
 }
 
@@ -198,13 +184,11 @@ pub fn list_entries(vault: &Vault) -> crate::error::Result<Vec<(EntryId, String)
     Ok(entries)
 }
 
-/// Search entries by name (case-insensitive substring match).
+/// Search entry names for a substring after Unicode lowercasing.
 ///
 /// # Errors
 ///
 /// Returns `VaultError::Locked` if the vault is not unlocked.
-// Preserve existing integer conversion semantics. Bounds changes need separate review.
-#[allow(clippy::cast_possible_truncation)]
 pub fn search_by_name(vault: &Vault, query: &str) -> crate::error::Result<Vec<Entry>> {
     let kek = vault.kek()?;
     let query_lower = query.to_lowercase();
@@ -215,7 +199,9 @@ pub fn search_by_name(vault: &Vault, query: &str) -> crate::error::Result<Vec<En
             continue;
         }
         if meta.title.to_lowercase().contains(&query_lower) {
-            let offset = meta.entry_offset as usize;
+            let Ok(offset) = usize::try_from(meta.entry_offset) else {
+                continue;
+            };
             let length = meta.entry_length as usize;
             let blob = vault.entries_blob();
             if offset + length <= blob.len() {
@@ -233,37 +219,22 @@ pub fn search_by_name(vault: &Vault, query: &str) -> crate::error::Result<Vec<En
 
 /// Search entries by tag.
 ///
-/// Returns all entries that have the specified tag. Requires
-/// decrypting entries to check tags.
-///
+/// Tags come from authenticated, encrypted entry records. Older vaults may
+/// contain an incomplete plaintext index, which is ignored.
 /// # Errors
-///
 /// Returns `VaultError::Locked` if the vault is not unlocked.
-// Preserve existing integer conversion semantics. Bounds changes need separate review.
-#[allow(clippy::cast_possible_truncation)]
 pub fn search_by_tag(vault: &Vault, tag: &str) -> crate::error::Result<Vec<Entry>> {
-    let kek = vault.kek()?;
     let tag_lower = tag.to_lowercase();
-    let mut results = Vec::new();
-
-    for meta in vault.index().entries.values() {
-        if meta.deleted {
-            continue;
-        }
-        let offset = meta.entry_offset as usize;
-        let length = meta.entry_length as usize;
-        let blob = vault.entries_blob();
-        if offset + length <= blob.len() {
-            let encrypted = &blob[offset..offset + length];
-            if let Ok(decrypted) = crate::vault::entries::decrypt_entry(encrypted, kek) {
-                if let Ok(entry) = deserialize_entry(&decrypted) {
-                    if entry.tags.iter().any(|t| t.to_lowercase() == tag_lower) {
-                        results.push(entry);
-                    }
-                }
-            }
-        }
-    }
+    let results = list_entries(vault)?
+        .into_iter()
+        .filter_map(|(id, _)| read_entry(vault, &id).ok())
+        .filter(|entry| {
+            entry
+                .tags
+                .iter()
+                .any(|value| value.to_lowercase() == tag_lower)
+        })
+        .collect();
     Ok(results)
 }
 
@@ -493,6 +464,29 @@ mod tests {
     }
 
     #[test]
+    fn search_by_name_preserves_unicode_lowercase_substrings() {
+        let (mut vault, _storage) = test_vault();
+        create_entry(
+            &mut vault,
+            "Über-İD Account".to_owned(),
+            EntryData::Credential {
+                username: "u".to_owned(),
+                password: "p".to_owned(),
+                url: None,
+                notes: None,
+            },
+            vec![],
+        )
+        .unwrap();
+        for query in ["üBER", "i\u{307}d", "ACCOUNT", ""] {
+            let matches = search_by_name(&vault, query).unwrap();
+            assert_eq!(matches.len(), 1, "query {query:?}");
+            assert_eq!(matches[0].name, "Über-İD Account");
+        }
+        assert_eq!(search_by_name(&vault, "missing").unwrap().len(), 0);
+    }
+
+    #[test]
     fn test_search_by_tag() {
         let (mut vault, _storage) = test_vault();
         create_entry(
@@ -523,6 +517,76 @@ mod tests {
         let results = search_by_tag(&vault, "production").unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "tagged");
+    }
+
+    #[test]
+    fn tag_search_ignores_incomplete_legacy_index_and_keeps_tags_encrypted() {
+        let (mut vault, storage) = test_vault();
+        let tag = "Distinctive-Tag-Über";
+        let data = EntryData::Credential {
+            username: String::new(),
+            password: "secret".to_string(),
+            url: None,
+            notes: None,
+        };
+        let first = create_entry(
+            &mut vault,
+            "first".to_string(),
+            data.clone(),
+            vec![tag.into()],
+        )
+        .unwrap();
+        let second = create_entry(
+            &mut vault,
+            "second".to_string(),
+            data.clone(),
+            vec![tag.into()],
+        )
+        .unwrap();
+        vault.write_to_storage(&storage).unwrap();
+        let mut vault = Vault::open("test", &storage, &KdfParams::testing()).unwrap();
+        let third = create_entry(
+            &mut vault,
+            "third".to_string(),
+            data.clone(),
+            vec![tag.into()],
+        )
+        .unwrap();
+        let index = vault.index_mut().unwrap();
+        let third_uuid = *third.id.as_bytes();
+        index
+            .entries
+            .get_mut(&third_uuid)
+            .unwrap()
+            .tags
+            .push(tag.into());
+        index.tag_index.insert(
+            tag.to_lowercase(),
+            vec![third_uuid, third_uuid, *second.id.as_bytes(), [0; 16]],
+        );
+        update_entry(&mut vault, &first.id, data).unwrap();
+        delete_entry(&mut vault, &second.id).unwrap();
+
+        let assert_matches = |vault: &Vault| {
+            let mut names: Vec<_> = search_by_tag(vault, &tag.to_uppercase())
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect();
+            names.sort();
+            assert_eq!(names, ["first", "third"]);
+        };
+        assert_matches(&vault);
+        vault.write_to_storage(&storage).unwrap();
+        let bytes = storage.read_vault().unwrap();
+        for value in [tag.to_owned(), tag.to_lowercase()] {
+            assert!(!bytes
+                .windows(value.len())
+                .any(|window| window == value.as_bytes()));
+        }
+        let reopened = Vault::open("test", &storage, &KdfParams::testing()).unwrap();
+        assert_eq!(reopened.index().tag_index.len(), 0);
+        assert_matches(&reopened);
     }
 
     #[test]

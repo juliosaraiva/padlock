@@ -31,5 +31,25 @@ panic = "abort"
 [profile.dev]
 opt-level = 0
 
+# Optimize crypto crates even in debug builds to avoid 5-8x slowdown
+# in Argon2id KDF (16s → 2-3s on Apple Silicon M1).
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.chacha20poly1305]
+opt-level = 3
+
+[profile.dev.package.chacha20]
+opt-level = 3
+
+[profile.dev.package.poly1305]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
 [profile.test]
 opt-level = 1

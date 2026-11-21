@@ -25,10 +25,10 @@ pub struct ExecCmd {
 /// Execute the exec command.
 ///
 /// # Errors
-/// Returns an error if an entry cannot be read or the child process cannot start.
-// Keep ownership at the command dispatch boundary.
+///
+/// Returns an error if vault access fails or the child process cannot be started.
 #[allow(clippy::needless_pass_by_value)]
-pub fn run(cmd: ExecCmd, vault_path: &str) -> anyhow::Result<()> {
+pub fn run(cmd: ExecCmd, vault_path: &str, no_session: bool) -> anyhow::Result<()> {
     // Parse VAR=entry_name pairs
     let mut mappings = Vec::new();
     for assignment in &cmd.assignments {
@@ -47,7 +47,7 @@ pub fn run(cmd: ExecCmd, vault_path: &str) -> anyhow::Result<()> {
         anyhow::bail!("no command specified after --");
     }
 
-    let vault = open_vault_with_session(vault_path)?;
+    let vault = open_vault_with_session(vault_path, no_session)?;
 
     // Resolve each entry and extract the secret value
     let mut env_vars = Vec::new();

@@ -55,7 +55,7 @@ pub struct GitVerifyCmd {
 /// Manage the allowed-signers file.
 #[derive(Args)]
 pub struct GitAllowedSignersCmd {
-    /// Output file path (default: the `allowed_signers` file next to the vault).
+    /// Output file path. Defaults to `allowed_signers` beside the vault.
     #[arg(long)]
     pub output: Option<String>,
 
@@ -67,7 +67,8 @@ pub struct GitAllowedSignersCmd {
 /// Execute the git command group.
 ///
 /// # Errors
-/// Returns an error if the signing operation, verification, or allowed-signers file operation fails.
+///
+/// Returns an error if the git subcommand fails.
 pub fn run(cmd: GitCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
     match cmd.command {
         GitSubcommand::Setup(setup) => run_setup(setup, vault_path, json),
@@ -77,13 +78,12 @@ pub fn run(cmd: GitCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
 }
 
 /// Run `padlock git setup`.
-// Keep ownership at the command dispatch boundary.
 #[allow(clippy::needless_pass_by_value)]
 fn run_setup(cmd: GitSetupCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
     let path = resolve_vault_path(vault_path);
     let storage = FilesystemBackend::new(path.clone());
     let passphrase = prompt_passphrase("Passphrase: ")?;
-    let vault = Vault::open(&passphrase, &storage, &KdfParams::production())?;
+    let vault = Vault::open(&passphrase, &storage, &KdfParams::legacy_production())?;
 
     // Find SSH keys in the vault
     let entries = list_entries(&vault)?;
@@ -180,7 +180,6 @@ fn run_setup(cmd: GitSetupCmd, vault_path: &str, json: bool) -> anyhow::Result<(
 }
 
 /// Run `padlock git verify`.
-// Keep ownership at the command dispatch boundary.
 #[allow(clippy::needless_pass_by_value)]
 fn run_verify(cmd: GitVerifyCmd, json: bool) -> anyhow::Result<()> {
     let result = git_config::verify_commit(&cmd.commit)?;
@@ -225,7 +224,6 @@ fn run_verify(cmd: GitVerifyCmd, json: bool) -> anyhow::Result<()> {
 }
 
 /// Run `padlock git allowed-signers`.
-// Keep ownership at the command dispatch boundary.
 #[allow(clippy::needless_pass_by_value)]
 fn run_allowed_signers(
     cmd: GitAllowedSignersCmd,
@@ -235,7 +233,7 @@ fn run_allowed_signers(
     let path = resolve_vault_path(vault_path);
     let storage = FilesystemBackend::new(path.clone());
     let passphrase = prompt_passphrase("Passphrase: ")?;
-    let vault = Vault::open(&passphrase, &storage, &KdfParams::production())?;
+    let vault = Vault::open(&passphrase, &storage, &KdfParams::legacy_production())?;
 
     // Find SSH keys with git/ssh tags
     let entries = list_entries(&vault)?;

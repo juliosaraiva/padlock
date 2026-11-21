@@ -49,7 +49,8 @@ pub struct ConfigListCmd;
 /// Execute the config command.
 ///
 /// # Errors
-/// Returns an error if the setting is invalid or the configuration cannot be read or saved.
+///
+/// Returns an error if the config operation fails.
 pub fn run(cmd: ConfigCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
     match cmd.command {
         ConfigSubcommand::Get(get) => run_get(get, vault_path, json),
@@ -64,7 +65,7 @@ fn config_path(vault_path: &str) -> std::path::PathBuf {
 }
 
 /// Load config from file, returning defaults if not found.
-fn load_config(vault_path: &str) -> anyhow::Result<Config> {
+pub(crate) fn load_config(vault_path: &str) -> anyhow::Result<Config> {
     let path = config_path(vault_path);
     if path.exists() {
         let contents = std::fs::read_to_string(&path)?;
@@ -90,6 +91,7 @@ fn save_config(vault_path: &str, config: &Config) -> anyhow::Result<()> {
 fn get_value(config: &Config, key: &str) -> anyhow::Result<String> {
     match key {
         "session.duration" => Ok(config.session.duration.clone()),
+        "session.idle_timeout" => Ok(config.session.idle_timeout.clone()),
         "session.max_sessions" => Ok(config.session.max_sessions.to_string()),
         "session.auto_session" => Ok(config.session.auto_session.to_string()),
         _ => anyhow::bail!("unknown configuration key: {key}"),
@@ -101,6 +103,9 @@ fn set_value(config: &mut Config, key: &str, value: &str) -> anyhow::Result<()> 
     match key {
         "session.duration" => {
             config.session.duration = value.to_string();
+        }
+        "session.idle_timeout" => {
+            config.session.idle_timeout = value.to_string();
         }
         "session.max_sessions" => {
             config.session.max_sessions = value
@@ -120,11 +125,11 @@ fn set_value(config: &mut Config, key: &str, value: &str) -> anyhow::Result<()> 
 /// All known configuration keys.
 const CONFIG_KEYS: &[&str] = &[
     "session.duration",
+    "session.idle_timeout",
     "session.max_sessions",
     "session.auto_session",
 ];
 
-// Keep ownership at the command dispatch boundary.
 #[allow(clippy::needless_pass_by_value)]
 fn run_get(cmd: ConfigGetCmd, vault_path: &str, json: bool) -> anyhow::Result<()> {
     let config = load_config(vault_path)?;
@@ -143,7 +148,6 @@ fn run_get(cmd: ConfigGetCmd, vault_path: &str, json: bool) -> anyhow::Result<()
     Ok(())
 }
 
-// Keep ownership at the command dispatch boundary.
 #[allow(clippy::needless_pass_by_value)]
 fn run_set(cmd: ConfigSetCmd, vault_path: &str) -> anyhow::Result<()> {
     let mut config = load_config(vault_path)?;

@@ -52,4 +52,22 @@ pub trait StorageBackend: Send + Sync {
     ///
     /// Returns an error if the backup write fails.
     fn write_backup(&self, data: &[u8]) -> Result<()>;
+
+    /// Write vault data from multiple segments without assembling a full buffer.
+    ///
+    /// The default implementation concatenates segments and calls `write_vault()`.
+    /// Filesystem backends can override this to write segments sequentially,
+    /// reducing peak memory usage for large vaults.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the write operation fails.
+    fn write_vault_segments(&self, segments: &[&[u8]]) -> Result<()> {
+        let total: usize = segments.iter().map(|s| s.len()).sum();
+        let mut data = Vec::with_capacity(total);
+        for segment in segments {
+            data.extend_from_slice(segment);
+        }
+        self.write_vault(&data)
+    }
 }

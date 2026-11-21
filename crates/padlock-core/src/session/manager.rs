@@ -6,13 +6,13 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rand::RngCore;
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
-use crate::crypto::aead::{aead_decrypt, aead_encrypt, generate_nonce, KEY_SIZE, NONCE_SIZE};
+use crate::crypto::aead::{aead_encrypt, generate_nonce, unwrap_dek, KEY_SIZE, NONCE_SIZE};
 use crate::crypto::secret_buf::SecretBuf;
 use crate::error::{Error, Result, SessionError};
 use crate::session::types::{
@@ -87,6 +87,7 @@ impl SessionManager for SessionStore {
         mackey: &SecretBuf,
         vault_id: &[u8; 16],
         duration: SessionDuration,
+        idle_timeout: Duration,
         algorithm: SessionAlgorithm,
     ) -> Result<SessionToken> {
         let mut sessions = self
@@ -135,6 +136,8 @@ impl SessionManager for SessionStore {
             algorithm,
             created_at: now,
             expires_at: now + duration.as_duration(),
+            idle_timeout,
+            last_accessed: now,
             created_at_wall: Timestamp::now(),
             use_count: 0,
             vault_id: *vault_id,
@@ -158,33 +161,30 @@ impl SessionManager for SessionStore {
             .get_mut(&session_id)
             .ok_or(Error::Session(SessionError::InvalidSession))?;
 
-        // Check expiry using monotonic clock
-        if Instant::now() >= session.expires_at {
-            // Remove expired session
+        let now = Instant::now();
+
+        // Check absolute expiry using monotonic clock
+        if now >= session.expires_at {
             sessions.remove(&session_id);
             return Err(Error::Session(SessionError::Expired));
         }
 
-        // Unwrap KEK
-        let kek_plaintext =
-            aead_decrypt(&session.sek, &session.kek_nonce, &[], &session.wrapped_kek)
-                .map_err(|_| Error::Session(SessionError::KeyOperationFailed))?;
+        // Check idle timeout — session expires if unused for too long
+        if now.duration_since(session.last_accessed) > session.idle_timeout {
+            sessions.remove(&session_id);
+            return Err(Error::Session(SessionError::Expired));
+        }
 
-        // Unwrap MACKEY
-        let mackey_plaintext = aead_decrypt(
-            &session.sek,
-            &session.mackey_nonce,
-            &[],
-            &session.wrapped_mackey,
-        )
-        .map_err(|_| Error::Session(SessionError::KeyOperationFailed))?;
+        let kek = unwrap_dek(&session.sek, &session.wrapped_kek, &session.kek_nonce)
+            .map_err(|_| Error::Session(SessionError::KeyOperationFailed))?;
+        let mackey = unwrap_dek(&session.sek, &session.wrapped_mackey, &session.mackey_nonce)
+            .map_err(|_| Error::Session(SessionError::KeyOperationFailed))?;
 
+        // Reset idle timer on successful use
+        session.last_accessed = now;
         session.use_count += 1;
 
-        Ok((
-            SecretBuf::from_bytes(&kek_plaintext),
-            SecretBuf::from_bytes(&mackey_plaintext),
-        ))
+        Ok((kek, mackey))
     }
 
     fn destroy_session(&self, token: &[u8; 32]) -> Result<()> {
@@ -213,7 +213,10 @@ impl SessionManager for SessionStore {
             .get(&session_id)
             .ok_or(Error::Session(SessionError::InvalidSession))?;
 
-        let valid = Instant::now() < session.expires_at;
+        let now = Instant::now();
+        let absolute_valid = now < session.expires_at;
+        let idle_valid = now.duration_since(session.last_accessed) <= session.idle_timeout;
+        let valid = absolute_valid && idle_valid;
 
         Ok(SessionInfo {
             id: session.id.to_string(),
@@ -222,6 +225,7 @@ impl SessionManager for SessionStore {
             use_count: session.use_count,
             vault_id: hex_encode(&session.vault_id),
             valid,
+            idle_timeout_secs: session.idle_timeout.as_secs(),
         })
     }
 
@@ -242,7 +246,11 @@ impl SessionManager for SessionStore {
 
         let now = Instant::now();
         let before = sessions.len();
-        sessions.retain(|_, s| now < s.expires_at);
+        sessions.retain(|_, s| {
+            let absolute_valid = now < s.expires_at;
+            let idle_valid = now.duration_since(s.last_accessed) <= s.idle_timeout;
+            absolute_valid && idle_valid
+        });
         Ok(before - sessions.len())
     }
 }
@@ -259,19 +267,19 @@ fn mackey_nonce_to_array(nonce: [u8; NONCE_SIZE]) -> [u8; 24] {
 
 /// Hex-encode a byte slice (lowercase).
 fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-
-    let mut output = String::new();
-    for byte in bytes {
-        // Writing to a String cannot fail.
-        let _ = write!(output, "{byte:02x}");
-    }
-    output
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            use std::fmt::Write;
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::types::DEFAULT_IDLE_TIMEOUT;
 
     fn test_kek() -> SecretBuf {
         let mut kek = SecretBuf::new(32);
@@ -298,6 +306,7 @@ mod tests {
                 &test_mackey(),
                 &test_vault_id(),
                 SessionDuration::OneHour,
+                DEFAULT_IDLE_TIMEOUT,
                 SessionAlgorithm::XChaCha20Poly1305HkdfSha256,
             )
             .unwrap();
@@ -316,6 +325,7 @@ mod tests {
                 &mackey,
                 &test_vault_id(),
                 SessionDuration::OneHour,
+                DEFAULT_IDLE_TIMEOUT,
                 SessionAlgorithm::XChaCha20Poly1305HkdfSha256,
             )
             .unwrap();
@@ -324,6 +334,79 @@ mod tests {
         let (recovered_kek, recovered_mackey) = store.resume_session(&token_bytes).unwrap();
         assert_eq!(&*recovered_kek, &*kek);
         assert_eq!(&*recovered_mackey, &*mackey);
+    }
+
+    fn create_timed_session(store: &SessionStore, idle_timeout: Duration) -> [u8; 32] {
+        let token = store
+            .create_session(
+                &test_kek(),
+                &test_mackey(),
+                &test_vault_id(),
+                SessionDuration::OneHour,
+                idle_timeout,
+                SessionAlgorithm::XChaCha20Poly1305HkdfSha256,
+            )
+            .unwrap();
+        token.as_bytes().try_into().unwrap()
+    }
+
+    #[test]
+    fn resume_renews_idle_without_extending_absolute_expiry() {
+        let store = SessionStore::new();
+        let token = create_timed_session(&store, Duration::from_secs(60));
+        let (id, previous_access, expiry) = {
+            let mut sessions = store.sessions.lock().unwrap();
+            let id = SessionStore::find_by_token(&sessions, &token).unwrap();
+            let session = sessions.get_mut(&id).unwrap();
+            session.last_accessed = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
+            (id, session.last_accessed, session.expires_at)
+        };
+
+        drop(store.resume_session(&token).unwrap());
+        {
+            let mut sessions = store.sessions.lock().unwrap();
+            let session = sessions.get_mut(&id).unwrap();
+            assert!(session.last_accessed > previous_access);
+            assert_eq!(session.expires_at, expiry);
+
+            session.last_accessed = Instant::now();
+            session.expires_at = session
+                .last_accessed
+                .checked_sub(Duration::from_secs(1))
+                .unwrap();
+        }
+        assert!(!store.session_status(&token).unwrap().valid);
+        assert!(matches!(
+            store.resume_session(&token),
+            Err(Error::Session(SessionError::Expired))
+        ));
+        assert!(matches!(
+            store.session_status(&token),
+            Err(Error::Session(SessionError::InvalidSession))
+        ));
+    }
+
+    #[test]
+    fn status_and_sweep_agree_on_idle_expiry_and_live_control() {
+        let store = SessionStore::new();
+        let idle_timeout = Duration::from_secs(60);
+        let expired = create_timed_session(&store, idle_timeout);
+        let live = create_timed_session(&store, idle_timeout);
+        {
+            let mut sessions = store.sessions.lock().unwrap();
+            let id = SessionStore::find_by_token(&sessions, &expired).unwrap();
+            let session = sessions.get_mut(&id).unwrap();
+            session.last_accessed = Instant::now().checked_sub(2 * idle_timeout).unwrap();
+        }
+        assert!(!store.session_status(&expired).unwrap().valid);
+        assert!(store.session_status(&live).unwrap().valid);
+        assert_eq!(store.sweep_expired().unwrap(), 1);
+        assert!(matches!(
+            store.session_status(&expired),
+            Err(Error::Session(SessionError::InvalidSession))
+        ));
+        assert!(store.session_status(&live).unwrap().valid);
+        assert_eq!(store.sweep_expired().unwrap(), 0);
     }
 
     #[test]
@@ -335,6 +418,7 @@ mod tests {
                 &test_mackey(),
                 &test_vault_id(),
                 SessionDuration::OneHour,
+                DEFAULT_IDLE_TIMEOUT,
                 SessionAlgorithm::XChaCha20Poly1305HkdfSha256,
             )
             .unwrap();
@@ -356,6 +440,7 @@ mod tests {
                 &test_mackey(),
                 &test_vault_id(),
                 SessionDuration::OneHour,
+                DEFAULT_IDLE_TIMEOUT,
                 SessionAlgorithm::XChaCha20Poly1305HkdfSha256,
             )
             .unwrap();
@@ -374,6 +459,7 @@ mod tests {
                 &test_mackey(),
                 &test_vault_id(),
                 SessionDuration::OneHour,
+                DEFAULT_IDLE_TIMEOUT,
                 SessionAlgorithm::XChaCha20Poly1305HkdfSha256,
             )
             .unwrap();
@@ -395,6 +481,7 @@ mod tests {
                     &test_mackey(),
                     &test_vault_id(),
                     SessionDuration::OneHour,
+                    DEFAULT_IDLE_TIMEOUT,
                     SessionAlgorithm::XChaCha20Poly1305HkdfSha256,
                 )
                 .unwrap();
@@ -415,6 +502,7 @@ mod tests {
                 &test_mackey(),
                 &test_vault_id(),
                 SessionDuration::OneHour,
+                DEFAULT_IDLE_TIMEOUT,
                 SessionAlgorithm::XChaCha20Poly1305HkdfSha256,
             )
             .unwrap();
@@ -424,6 +512,7 @@ mod tests {
                 &test_mackey(),
                 &test_vault_id(),
                 SessionDuration::OneHour,
+                DEFAULT_IDLE_TIMEOUT,
                 SessionAlgorithm::XChaCha20Poly1305HkdfSha256,
             )
             .unwrap();
@@ -434,6 +523,7 @@ mod tests {
             &test_mackey(),
             &test_vault_id(),
             SessionDuration::OneHour,
+            DEFAULT_IDLE_TIMEOUT,
             SessionAlgorithm::XChaCha20Poly1305HkdfSha256,
         );
         assert!(matches!(
@@ -451,6 +541,7 @@ mod tests {
                 &test_mackey(),
                 &test_vault_id(),
                 SessionDuration::OneHour,
+                DEFAULT_IDLE_TIMEOUT,
                 SessionAlgorithm::XChaCha20Poly1305HkdfSha256,
             )
             .unwrap();
@@ -460,6 +551,7 @@ mod tests {
                 &test_mackey(),
                 &test_vault_id(),
                 SessionDuration::OneHour,
+                DEFAULT_IDLE_TIMEOUT,
                 SessionAlgorithm::XChaCha20Poly1305HkdfSha256,
             )
             .unwrap();
@@ -475,6 +567,7 @@ mod tests {
                 &test_mackey(),
                 &test_vault_id(),
                 SessionDuration::OneHour,
+                DEFAULT_IDLE_TIMEOUT,
                 SessionAlgorithm::XChaCha20Poly1305HkdfSha256,
             )
             .unwrap();
@@ -483,9 +576,34 @@ mod tests {
         let info = store.session_status(&token_bytes).unwrap();
         assert!(info.valid);
         assert_eq!(info.use_count, 0);
+        assert_eq!(info.idle_timeout_secs, DEFAULT_IDLE_TIMEOUT.as_secs());
         assert_eq!(
             info.algorithm,
             SessionAlgorithm::XChaCha20Poly1305HkdfSha256
         );
+    }
+
+    #[test]
+    fn test_session_idle_timeout_zero_expires_immediately() {
+        let store = SessionStore::new();
+        let token = store
+            .create_session(
+                &test_kek(),
+                &test_mackey(),
+                &test_vault_id(),
+                SessionDuration::OneHour,
+                Duration::from_secs(0),
+                SessionAlgorithm::XChaCha20Poly1305HkdfSha256,
+            )
+            .unwrap();
+
+        let token_bytes: [u8; 32] = token.as_bytes().try_into().unwrap();
+        // With zero idle timeout, any delay causes expiry
+        std::thread::sleep(Duration::from_millis(10));
+        let result = store.resume_session(&token_bytes);
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::Session(SessionError::Expired)
+        ));
     }
 }

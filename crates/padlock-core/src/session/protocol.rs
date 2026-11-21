@@ -13,6 +13,9 @@
 //! same protocol version prefix, or `SSH_AGENT_FAILURE` (5) on error.
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
+
+use crate::crypto::{aead::KEY_SIZE, secret_buf::SecretBuf};
 
 use crate::error::{AgentError, Error, Result, SessionError};
 
@@ -59,17 +62,19 @@ impl SessionMessageType {
     }
 }
 
-/// Request to create a new session.
-#[derive(Debug, Serialize, Deserialize)]
+/// Request to create a new session over the permission-restricted socket.
+#[derive(Serialize, Deserialize)]
 pub struct CreateSessionRequest {
     /// Algorithm identifier byte.
     pub algorithm: u8,
-    /// KEK encrypted with transit key.
-    pub encrypted_kek: Vec<u8>,
+    /// Raw KEK bytes. Field name is kept for wire compatibility.
+    #[serde(with = "raw_session_key")]
+    pub encrypted_kek: SecretBuf,
     /// Nonce for KEK transit encryption.
     pub kek_nonce: Vec<u8>,
-    /// MACKEY encrypted with transit key.
-    pub encrypted_mackey: Vec<u8>,
+    /// Raw MACKEY bytes. Field name is kept for wire compatibility.
+    #[serde(with = "raw_session_key")]
+    pub encrypted_mackey: SecretBuf,
     /// Nonce for MACKEY transit encryption.
     pub mackey_nonce: Vec<u8>,
     /// Initiator's ephemeral X25519 public key.
@@ -78,6 +83,70 @@ pub struct CreateSessionRequest {
     pub duration: String,
     /// Vault identifier.
     pub vault_id: Vec<u8>,
+    /// Idle timeout in seconds. Session expires if unused for this long.
+    /// Defaults to 900 (15 minutes) if not present (backward compat).
+    #[serde(default = "default_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+}
+
+impl std::fmt::Debug for CreateSessionRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CreateSessionRequest")
+            .field("algorithm", &self.algorithm)
+            .finish_non_exhaustive()
+    }
+}
+
+// Preserve the existing MessagePack sequence of bytes. Decode directly
+// into a wiping allocation, including when a later field fails to decode.
+mod raw_session_key {
+    use super::{SecretBuf, KEY_SIZE};
+    use serde::{de, Serialize};
+
+    pub(super) fn serialize<S: serde::Serializer>(
+        key: &SecretBuf,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        if key.len() != KEY_SIZE {
+            return Err(serde::ser::Error::custom("invalid session key length"));
+        }
+        key[..].serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: de::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<SecretBuf, D::Error> {
+        struct KeyVisitor;
+
+        impl<'de> de::Visitor<'de> for KeyVisitor {
+            type Value = SecretBuf;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(formatter, "a sequence of {KEY_SIZE} key bytes")
+            }
+
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<SecretBuf, A::Error> {
+                let mut key = SecretBuf::new(KEY_SIZE);
+                for (index, byte) in key.as_mut_slice().iter_mut().enumerate() {
+                    *byte = seq
+                        .next_element()?
+                        .ok_or_else(|| de::Error::invalid_length(index, &self))?;
+                }
+                if seq.next_element::<de::IgnoredAny>()?.is_some() {
+                    return Err(de::Error::invalid_length(KEY_SIZE + 1, &self));
+                }
+                Ok(key)
+            }
+        }
+
+        deserializer.deserialize_seq(KeyVisitor)
+    }
+}
+
+/// Default idle timeout for backward compatibility with older clients.
+fn default_idle_timeout_secs() -> u64 {
+    900
 }
 
 /// Response to a successful session creation.
@@ -188,10 +257,10 @@ pub fn parse_session_request(payload: &[u8]) -> Result<SessionRequest> {
 
     match msg_type {
         SessionMessageType::Create => {
-            let req: CreateSessionRequest = rmp_serde::from_slice(body).map_err(|e| {
-                Error::Agent(AgentError::ProtocolError(format!(
-                    "invalid CreateSession payload: {e}"
-                )))
+            let req: CreateSessionRequest = rmp_serde::from_slice(body).map_err(|_| {
+                Error::Agent(AgentError::ProtocolError(
+                    "invalid CreateSession payload".to_owned(),
+                ))
             })?;
             Ok(SessionRequest::Create(req))
         }
@@ -276,17 +345,28 @@ pub fn serialize_session_response(response: &SessionResponse) -> Result<Vec<u8>>
 /// [N bytes] extension name
 /// [...]     session payload (version + type + msgpack)
 /// ```
-// Preserve existing integer conversion semantics. Bounds changes need separate review.
-#[allow(clippy::cast_possible_truncation)]
+///
+/// # Panics
+///
+/// Panics if the message or extension name exceeds `u32::MAX` bytes (not
+/// possible in practice).
 #[must_use]
-pub fn build_extension_message(session_payload: &[u8]) -> Vec<u8> {
+pub fn build_extension_message(session_payload: &[u8]) -> Zeroizing<Vec<u8>> {
     let name_bytes = SESSION_EXTENSION_NAME.as_bytes();
     let payload_len = 1 + 4 + name_bytes.len() + session_payload.len();
 
-    let mut msg = Vec::with_capacity(4 + payload_len);
-    msg.extend_from_slice(&(payload_len as u32).to_be_bytes());
+    let mut msg = Zeroizing::new(Vec::with_capacity(4 + payload_len));
+    msg.extend_from_slice(
+        &u32::try_from(payload_len)
+            .expect("payload length fits in u32")
+            .to_be_bytes(),
+    );
     msg.push(SSH_AGENTC_EXTENSION);
-    msg.extend_from_slice(&(name_bytes.len() as u32).to_be_bytes());
+    msg.extend_from_slice(
+        &u32::try_from(name_bytes.len())
+            .expect("name length fits in u32")
+            .to_be_bytes(),
+    );
     msg.extend_from_slice(name_bytes);
     msg.extend_from_slice(session_payload);
     msg
@@ -297,14 +377,25 @@ pub fn build_extension_message(session_payload: &[u8]) -> Vec<u8> {
 /// # Errors
 ///
 /// Returns an error if serialization fails.
-pub fn build_create_request(req: &CreateSessionRequest) -> Result<Vec<u8>> {
-    let mut payload = vec![PROTOCOL_VERSION, SessionMessageType::Create as u8];
-    let body = rmp_serde::to_vec(req).map_err(|e| {
+pub fn build_create_request(req: &CreateSessionRequest) -> Result<Zeroizing<Vec<u8>>> {
+    // MessagePack uses at most two bytes per u8 and five bytes per sequence
+    // or string header. Reserve fixed overhead for all headers and scalars.
+    let sequence_bytes = 2 * KEY_SIZE
+        + req.kek_nonce.len()
+        + req.mackey_nonce.len()
+        + req.ephemeral_pubkey.len()
+        + req.vault_id.len();
+    let capacity = 64 + 2 * sequence_bytes + req.duration.len();
+    let mut payload = Zeroizing::new(vec![0; capacity]);
+    payload[..2].copy_from_slice(&[PROTOCOL_VERSION, SessionMessageType::Create as u8]);
+    let mut writer = &mut payload[2..];
+    rmp_serde::encode::write(&mut writer, req).map_err(|e| {
         Error::Agent(AgentError::ProtocolError(format!(
             "failed to serialize CreateSessionRequest: {e}"
         )))
     })?;
-    payload.extend_from_slice(&body);
+    let used = capacity - writer.len();
+    payload.truncate(used);
     Ok(payload)
 }
 
@@ -353,22 +444,88 @@ mod tests {
     use crate::session::transit::X25519_PUBKEY_SIZE;
     use crate::session::types::SESSION_TOKEN_SIZE;
 
-    #[test]
-    fn test_parse_create_session_request() {
-        let req = CreateSessionRequest {
+    fn create_request() -> CreateSessionRequest {
+        CreateSessionRequest {
             algorithm: 1,
-            encrypted_kek: vec![1, 2, 3],
+            encrypted_kek: SecretBuf::from_bytes(&[0xD1; KEY_SIZE]),
             kek_nonce: vec![0; NONCE_SIZE],
-            encrypted_mackey: vec![4, 5, 6],
+            encrypted_mackey: SecretBuf::from_bytes(&[0xE2; KEY_SIZE]),
             mackey_nonce: vec![0; NONCE_SIZE],
             ephemeral_pubkey: vec![0; X25519_PUBKEY_SIZE],
             duration: "1h".to_string(),
             vault_id: vec![0; 16],
-        };
+            idle_timeout_secs: 900,
+        }
+    }
 
+    #[test]
+    fn create_request_preserves_wire_bytes_and_borrows_extension() {
+        use crate::ssh_agent::protocol::{parse_message, AgentMessage};
+
+        let req = create_request();
         let payload = build_create_request(&req).unwrap();
-        let parsed = parse_session_request(&payload).unwrap();
-        assert!(matches!(parsed, SessionRequest::Create(_)));
+        let old_body = rmp_serde::to_vec(&(
+            req.algorithm,
+            &req.encrypted_kek[..],
+            &req.kek_nonce,
+            &req.encrypted_mackey[..],
+            &req.mackey_nonce,
+            &req.ephemeral_pubkey,
+            &req.duration,
+            &req.vault_id,
+            req.idle_timeout_secs,
+        ))
+        .unwrap();
+        assert_eq!(&payload[2..], old_body);
+
+        let frame = build_extension_message(&payload);
+        let msg = parse_message(&frame[4..]).unwrap();
+        assert!(!format!("{msg:?}").contains("209"));
+        let AgentMessage::Extension {
+            payload: extension, ..
+        } = msg
+        else {
+            panic!("expected an extension");
+        };
+        let offset = frame.len() - payload.len();
+        assert!(std::ptr::eq(extension.as_bytes(), &frame[offset..]));
+        let SessionRequest::Create(parsed) = parse_session_request(extension.as_bytes()).unwrap()
+        else {
+            panic!("expected a create-session request");
+        };
+        assert_eq!(&parsed.encrypted_kek[..], &req.encrypted_kek[..]);
+        assert_eq!(&parsed.encrypted_mackey[..], &req.encrypted_mackey[..]);
+    }
+
+    #[test]
+    fn create_request_rejects_partial_input_and_invalid_key_lengths() {
+        let mut req = create_request();
+        let payload = build_create_request(&req).unwrap();
+        for end in 0..payload.len() {
+            assert!(
+                parse_session_request(&payload[..end]).is_err(),
+                "offset {end}"
+            );
+        }
+
+        req.encrypted_mackey = SecretBuf::new(KEY_SIZE - 1);
+        assert!(build_create_request(&req).is_err());
+
+        // A legacy-shaped request can carry keys of any length on the wire.
+        let body = rmp_serde::to_vec(&(
+            req.algorithm,
+            &req.encrypted_kek[..],
+            &req.kek_nonce,
+            &req.encrypted_mackey[..],
+            &req.mackey_nonce,
+            &req.ephemeral_pubkey,
+            &req.duration,
+            &req.vault_id,
+        ))
+        .unwrap();
+        let mut payload = vec![PROTOCOL_VERSION, SessionMessageType::Create as u8];
+        payload.extend_from_slice(&body);
+        assert!(parse_session_request(&payload).is_err());
     }
 
     #[test]

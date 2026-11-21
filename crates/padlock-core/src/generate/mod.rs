@@ -16,9 +16,8 @@ use crate::entries::types::TOTPAlgorithm;
 use crate::error::{Error, GenerateError};
 
 /// Policy for password generation.
-// These flags independently select character classes.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct PasswordPolicy {
     /// Password length.
     pub length: usize,
@@ -123,8 +122,6 @@ pub fn generate_totp_code(
 }
 
 /// Generate a TOTP code for a specific Unix timestamp (for testing).
-// Preserve existing integer conversion semantics. Bounds changes need separate review.
-#[allow(clippy::cast_possible_truncation)]
 fn generate_totp_code_at(
     secret_b32: &str,
     algorithm: &TOTPAlgorithm,
@@ -179,7 +176,9 @@ fn generate_totp_code_at(
     let modulus = 10u32.pow(digits);
     let code = binary % modulus;
 
-    let seconds_remaining = period - (unix_time % u64::from(period)) as u32;
+    let seconds_remaining = period
+        - u32::try_from(unix_time % u64::from(period))
+            .expect("remainder is always less than period which fits in u32");
 
     Ok((
         format!("{code:0>width$}", width = digits as usize),

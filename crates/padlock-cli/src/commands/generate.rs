@@ -4,7 +4,6 @@ use clap::Args;
 use padlock_core::generate::{estimate_strength, generate_password, PasswordPolicy};
 
 /// Generate a random password.
-// These flags independently select character classes.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Args)]
 pub struct GenerateCmd {
@@ -32,8 +31,8 @@ pub struct GenerateCmd {
 /// Execute the generate command.
 ///
 /// # Errors
-/// Returns an error if the requested password options cannot be satisfied.
-// Keep ownership at the command dispatch boundary.
+///
+/// Returns an error if password generation fails.
 #[allow(clippy::needless_pass_by_value)]
 pub fn run(cmd: GenerateCmd, json: bool) -> anyhow::Result<()> {
     let policy = PasswordPolicy {

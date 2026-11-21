@@ -14,8 +14,11 @@ pub mod git;
 pub mod init;
 pub mod lock;
 pub mod ls;
+pub mod recover;
+pub mod recovery;
 pub mod rm;
 pub mod search;
+pub mod session;
 pub mod set;
 pub mod status;
 pub mod totp;
@@ -23,6 +26,7 @@ pub mod unlock;
 
 use std::io::{Read as IoRead, Write as IoWrite};
 use std::path::PathBuf;
+use zeroize::Zeroizing;
 
 use clap::{Parser, Subcommand};
 use padlock_core::crypto::secret_buf::SecretBuf;
@@ -36,6 +40,7 @@ use padlock_core::vault::lifecycle::{KdfParams, Vault};
 use padlock_core::vault::storage::FilesystemBackend;
 
 /// Padlock -- encrypted credential manager for developers.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Parser)]
 #[command(name = "padlock")]
 #[command(version, about = "Encrypted credential manager for developers")]
@@ -59,6 +64,10 @@ pub struct Cli {
     /// Disable colored output.
     #[arg(long, global = true)]
     pub no_color: bool,
+
+    /// Skip session caching — always prompt for passphrase.
+    #[arg(long, global = true)]
+    pub no_session: bool,
 
     /// Subcommand to execute.
     #[command(subcommand)]
@@ -102,6 +111,12 @@ pub enum Commands {
     Audit(audit::AuditCmd),
     /// Manage configuration.
     Config(config::ConfigCmd),
+    /// Manage active sessions.
+    Session(session::SessionCmd),
+    /// Recover a vault using a recovery key.
+    Recover(recover::RecoverCmd),
+    /// Manage vault recovery key.
+    Recovery(recovery::RecoveryCmd),
 }
 
 /// Resolve the vault path, expanding ~ to the home directory.
@@ -118,7 +133,8 @@ pub fn resolve_vault_path(path: &str) -> PathBuf {
 /// Prompt for the vault passphrase.
 ///
 /// # Errors
-/// Returns an error if the vault passphrase cannot be read.
+///
+/// Returns an error if reading the passphrase fails.
 pub fn prompt_passphrase(prompt: &str) -> anyhow::Result<String> {
     rpassword::prompt_password(prompt)
         .map_err(|e| anyhow::anyhow!("failed to read passphrase: {e}"))
@@ -137,14 +153,14 @@ fn session_token_path(vault_path: &str) -> PathBuf {
 }
 
 /// Get the agent socket path.
-fn agent_socket_path_for_session(vault_path: &str) -> PathBuf {
+pub(crate) fn agent_socket_path_for_session(vault_path: &str) -> PathBuf {
     padlock_dir(vault_path).join("agent.sock")
 }
 
 /// Read a session token from the environment or token file.
 ///
 /// Lookup order: `PADLOCK_SESSION` env var -> ~/.padlock/session.token file
-fn read_session_token(vault_path: &str) -> Option<[u8; SESSION_TOKEN_SIZE]> {
+pub(crate) fn read_session_token(vault_path: &str) -> Option<[u8; SESSION_TOKEN_SIZE]> {
     // Check environment variable first
     if let Ok(hex_str) = std::env::var("PADLOCK_SESSION") {
         if let Some(bytes) = hex_decode_32(&hex_str) {
@@ -199,10 +215,6 @@ fn try_resume_session(vault_path: &str) -> Option<(SecretBuf, SecretBuf)> {
     let token = read_session_token(vault_path)?;
     let socket = agent_socket_path_for_session(vault_path);
 
-    if !socket.exists() {
-        return None;
-    }
-
     // Generate ephemeral keypair for transit encryption (response path)
     let keypair = TransitKeyPair::generate();
     let our_pubkey = keypair.public_key_bytes();
@@ -214,10 +226,7 @@ fn try_resume_session(vault_path: &str) -> Option<(SecretBuf, SecretBuf)> {
     let session_payload = protocol::build_resume_request(&req).ok()?;
     let message = build_extension_message(&session_payload);
 
-    let mut stream = std::os::unix::net::UnixStream::connect(&socket).ok()?;
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .ok()?;
+    let mut stream = agent::connect_session_socket(&socket).ok()?;
     stream.write_all(&message).ok()?;
 
     // Read response
@@ -249,16 +258,31 @@ fn try_resume_session(vault_path: &str) -> Option<(SecretBuf, SecretBuf)> {
 
     // Decrypt KEK and MACKEY using transit key
     let kek_nonce: [u8; 24] = resume_resp.kek_nonce.try_into().ok()?;
-    let kek_bytes = transit_decrypt(&transit_key, &kek_nonce, &resume_resp.encrypted_kek).ok()?;
+    let kek_bytes =
+        Zeroizing::new(transit_decrypt(&transit_key, &kek_nonce, &resume_resp.encrypted_kek).ok()?);
 
     let mackey_nonce: [u8; 24] = resume_resp.mackey_nonce.try_into().ok()?;
-    let mackey_bytes =
-        transit_decrypt(&transit_key, &mackey_nonce, &resume_resp.encrypted_mackey).ok()?;
+    let mackey_bytes = Zeroizing::new(
+        transit_decrypt(&transit_key, &mackey_nonce, &resume_resp.encrypted_mackey).ok()?,
+    );
 
     Some((
         SecretBuf::from_bytes(&kek_bytes),
         SecretBuf::from_bytes(&mackey_bytes),
     ))
+}
+
+// Keep key-bearing buffers scoped to the write, including early errors.
+fn write_create_request(
+    writer: &mut impl IoWrite,
+    req: CreateSessionRequest,
+) -> anyhow::Result<()> {
+    let payload = protocol::build_create_request(&req)?;
+    drop(req);
+    let frame = build_extension_message(&payload);
+    drop(payload);
+    writer.write_all(&frame)?;
+    Ok(())
 }
 
 /// Send `CreateSession` to the daemon to cache KEK and MACKEY.
@@ -276,31 +300,23 @@ fn create_daemon_session(
     mackey: &SecretBuf,
     vault_id: &[u8; 16],
     duration: SessionDuration,
+    idle_timeout_secs: u64,
 ) -> Option<Vec<u8>> {
     let socket = agent_socket_path_for_session(vault_path);
-    if !socket.exists() {
-        return None;
-    }
-
+    let mut stream = agent::connect_session_socket(&socket).ok()?;
     let req = CreateSessionRequest {
         algorithm: SessionAlgorithm::XChaCha20Poly1305HkdfSha256.to_byte(),
-        encrypted_kek: kek.to_vec(),
+        encrypted_kek: SecretBuf::from_bytes(kek),
         kek_nonce: vec![0u8; 24],
-        encrypted_mackey: mackey.to_vec(),
+        encrypted_mackey: SecretBuf::from_bytes(mackey),
         mackey_nonce: vec![0u8; 24],
         ephemeral_pubkey: vec![0u8; 32],
         duration: duration.as_label().to_string(),
         vault_id: vault_id.to_vec(),
+        idle_timeout_secs,
     };
 
-    let session_payload = protocol::build_create_request(&req).ok()?;
-    let message = build_extension_message(&session_payload);
-
-    let mut stream = std::os::unix::net::UnixStream::connect(&socket).ok()?;
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .ok()?;
-    stream.write_all(&message).ok()?;
+    write_create_request(&mut stream, req).ok()?;
 
     // Read response
     let mut len_buf = [0u8; 4];
@@ -328,41 +344,49 @@ fn create_daemon_session(
     Some(create_resp.token)
 }
 
-/// Send `DestroySession` or `DestroyAll` to the daemon.
-pub fn destroy_daemon_session(vault_path: &str, token: Option<&[u8; SESSION_TOKEN_SIZE]>) {
-    let socket = agent_socket_path_for_session(vault_path);
-    if !socket.exists() {
-        return;
-    }
+/// Send `DestroySession` or `DestroyAll` and require the daemon's success response.
+///
+/// # Errors
+/// Returns an error on connection failure, refusal or invalid acknowledgment.
+pub fn destroy_daemon_session(
+    vault_path: &str,
+    token: Option<&[u8; SESSION_TOKEN_SIZE]>,
+) -> anyhow::Result<()> {
+    use padlock_core::ssh_agent::{protocol::serialize_response, AgentResponse};
 
-    let session_payload = if let Some(token) = token {
-        let req = padlock_core::session::protocol::DestroySessionRequest {
+    let socket = agent_socket_path_for_session(vault_path);
+    let mut stream = agent::connect_session_socket(&socket)?;
+    let payload = if let Some(token) = token {
+        let req = protocol::DestroySessionRequest {
             token: token.to_vec(),
         };
-        protocol::build_destroy_request(&req).ok()
+        protocol::build_destroy_request(&req)?
     } else {
-        Some(protocol::build_destroy_all_request())
+        protocol::build_destroy_all_request()
     };
+    stream.write_all(&build_extension_message(&payload))?;
 
-    let Some(payload) = session_payload else {
-        return;
-    };
-
-    let message = build_extension_message(&payload);
-
-    if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket) {
-        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-        let _ = stream.write_all(&message);
-        // Read and discard response
-        let mut len_buf = [0u8; 4];
-        if stream.read_exact(&mut len_buf).is_ok() {
-            let resp_len = u32::from_be_bytes(len_buf) as usize;
-            if resp_len > 0 && resp_len <= 256 * 1024 {
-                let mut resp_buf = vec![0u8; resp_len];
-                let _ = stream.read_exact(&mut resp_buf);
-            }
-        }
+    let expected = serialize_response(&AgentResponse::ExtensionResponse {
+        payload: protocol::serialize_session_response(&protocol::SessionResponse::Success)?,
+    });
+    let mut header = [0; 4];
+    stream.read_exact(&mut header)?;
+    if header != expected[..4] {
+        anyhow::bail!("agent did not acknowledge session revocation");
     }
+    let mut body = [0; 2];
+    stream.read_exact(&mut body)?;
+    if body != expected[4..] {
+        anyhow::bail!("agent did not acknowledge session revocation");
+    }
+    Ok(())
+}
+
+/// Ensure the agent daemon is running, auto-starting it if necessary.
+///
+/// Returns `true` if the daemon is running (or was started successfully).
+pub(crate) fn ensure_daemon_running(vault_path: &str) -> bool {
+    agent::ensure_background(vault_path).is_ok()
 }
 
 /// Open a vault, trying session cache first, then falling back to passphrase.
@@ -371,31 +395,43 @@ pub fn destroy_daemon_session(vault_path: &str, token: Option<&[u8; SESSION_TOKE
 /// If no valid session exists, prompts for passphrase and optionally creates
 /// a session for future use.
 ///
+/// When `no_session` is true, session caching is bypassed entirely.
+///
 /// # Errors
-/// Returns an error if the vault cannot be opened with cached keys or a passphrase.
-pub fn open_vault_with_session(vault_path: &str) -> anyhow::Result<Vault> {
+///
+/// Returns an error if vault opening or passphrase reading fails.
+pub fn open_vault_with_session(vault_path: &str, no_session: bool) -> anyhow::Result<Vault> {
     let path = resolve_vault_path(vault_path);
     let storage = FilesystemBackend::new(path);
 
-    // Try to resume from session cache
-    if let Some((kek, mackey)) = try_resume_session(vault_path) {
-        if let Ok(vault) = Vault::open_with_keys(kek, mackey, &storage) {
-            return Ok(vault);
+    if !no_session && ensure_daemon_running(vault_path) {
+        // Try to resume from session cache
+        if let Some((kek, mackey)) = try_resume_session(vault_path) {
+            if let Ok(vault) = Vault::open_with_keys(kek, mackey, &storage) {
+                return Ok(vault);
+            }
+            // Session keys are stale, fall through to passphrase
         }
-        // Session keys are stale, fall through to passphrase
     }
 
     // Fall back to passphrase prompt
     let passphrase = prompt_passphrase("Passphrase: ")?;
-    let vault = Vault::open(&passphrase, &storage, &KdfParams::production())?;
+    let vault = Vault::open(&passphrase, &storage, &KdfParams::legacy_production())?;
 
-    // Try to create a session for next time
-    if let (Ok(kek), Ok(mackey)) = (vault.kek(), vault.mackey()) {
-        let vault_id = vault.header().vault_uuid;
-        if let Some(token) =
-            create_daemon_session(vault_path, kek, mackey, &vault_id, SessionDuration::OneHour)
-        {
-            let _ = save_session_token(vault_path, &token);
+    // Try to create a session for next time (respecting config)
+    if !no_session {
+        let cfg = config::load_config(vault_path).unwrap_or_default();
+        if cfg.session.auto_session && ensure_daemon_running(vault_path) {
+            if let (Ok(kek), Ok(mackey)) = (vault.kek(), vault.mackey()) {
+                let vault_id = vault.header().vault_uuid;
+                let duration = cfg.session.parsed_duration();
+                let idle_secs = cfg.session.parsed_idle_timeout().as_secs();
+                if let Some(token) =
+                    create_daemon_session(vault_path, kek, mackey, &vault_id, duration, idle_secs)
+                {
+                    let _ = save_session_token(vault_path, &token);
+                }
+            }
         }
     }
 
@@ -404,30 +440,45 @@ pub fn open_vault_with_session(vault_path: &str) -> anyhow::Result<Vault> {
 
 /// Open a vault mutably, trying session cache first.
 ///
+/// When `no_session` is true, session caching is bypassed entirely.
+///
 /// # Errors
-/// Returns an error if the vault cannot be opened with cached keys or a passphrase.
-pub fn open_vault_mut_with_session(vault_path: &str) -> anyhow::Result<(Vault, FilesystemBackend)> {
+///
+/// Returns an error if vault opening or passphrase reading fails.
+pub fn open_vault_mut_with_session(
+    vault_path: &str,
+    no_session: bool,
+) -> anyhow::Result<(Vault, FilesystemBackend)> {
     let path = resolve_vault_path(vault_path);
     let storage = FilesystemBackend::new(path);
 
-    // Try to resume from session cache
-    if let Some((kek, mackey)) = try_resume_session(vault_path) {
-        if let Ok(vault) = Vault::open_with_keys(kek, mackey, &storage) {
-            return Ok((vault, storage));
+    if !no_session && ensure_daemon_running(vault_path) {
+        // Try to resume from session cache
+        if let Some((kek, mackey)) = try_resume_session(vault_path) {
+            if let Ok(vault) = Vault::open_with_keys(kek, mackey, &storage) {
+                return Ok((vault, storage));
+            }
+            // Fall through
         }
-        // Fall through
     }
 
     let passphrase = prompt_passphrase("Passphrase: ")?;
-    let vault = Vault::open(&passphrase, &storage, &KdfParams::production())?;
+    let vault = Vault::open(&passphrase, &storage, &KdfParams::legacy_production())?;
 
-    // Try to create a session
-    if let (Ok(kek), Ok(mackey)) = (vault.kek(), vault.mackey()) {
-        let vault_id = vault.header().vault_uuid;
-        if let Some(token) =
-            create_daemon_session(vault_path, kek, mackey, &vault_id, SessionDuration::OneHour)
-        {
-            let _ = save_session_token(vault_path, &token);
+    // Try to create a session (respecting config)
+    if !no_session {
+        let cfg = config::load_config(vault_path).unwrap_or_default();
+        if cfg.session.auto_session && ensure_daemon_running(vault_path) {
+            if let (Ok(kek), Ok(mackey)) = (vault.kek(), vault.mackey()) {
+                let vault_id = vault.header().vault_uuid;
+                let duration = cfg.session.parsed_duration();
+                let idle_secs = cfg.session.parsed_idle_timeout().as_secs();
+                if let Some(token) =
+                    create_daemon_session(vault_path, kek, mackey, &vault_id, duration, idle_secs)
+                {
+                    let _ = save_session_token(vault_path, &token);
+                }
+            }
         }
     }
 
@@ -436,14 +487,13 @@ pub fn open_vault_mut_with_session(vault_path: &str) -> anyhow::Result<(Vault, F
 
 /// Hex-encode bytes to lowercase hex string.
 fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-
-    let mut output = String::new();
-    for byte in bytes {
-        // Writing to a String cannot fail.
-        let _ = write!(output, "{byte:02x}");
-    }
-    output
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            use std::fmt::Write;
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }
 
 /// Decode a 32-byte hex string to a fixed-size array.
@@ -460,4 +510,61 @@ fn hex_decode_32(hex: &str) -> Option<[u8; 32]> {
         bytes[i] = u8::from_str_radix(s, 16).ok()?;
     }
     Some(bytes)
+}
+
+#[cfg(test)]
+mod session_ipc_tests {
+    use super::*;
+
+    #[test]
+    fn create_session_write_boundary_rejects_unsafe_socket() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path().join("fixture.vault");
+        let socket = dir.path().join("agent.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o666)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+
+        // Call the write boundary directly. No daemon readiness probe runs here.
+        let token = create_daemon_session(
+            vault.to_str().unwrap(),
+            &SecretBuf::from_bytes(&[0xD1; 32]),
+            &SecretBuf::from_bytes(&[0xE2; 32]),
+            &[0; 16],
+            SessionDuration::OneHour,
+            900,
+        );
+        assert!(token.is_none());
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "rejected socket must receive no connection or credential bytes"
+        );
+    }
+
+    #[test]
+    fn create_request_surfaces_failed_socket_write() {
+        let (mut writer, _reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        writer.shutdown(std::net::Shutdown::Write).unwrap();
+        let req = CreateSessionRequest {
+            algorithm: SessionAlgorithm::XChaCha20Poly1305HkdfSha256.to_byte(),
+            encrypted_kek: SecretBuf::from_bytes(&[0xD1; 32]),
+            kek_nonce: vec![0; 24],
+            encrypted_mackey: SecretBuf::from_bytes(&[0xE2; 32]),
+            mackey_nonce: vec![0; 24],
+            ephemeral_pubkey: vec![0; 32],
+            duration: "1h".to_owned(),
+            vault_id: vec![0; 16],
+            idle_timeout_secs: 900,
+        };
+
+        let error = write_create_request(&mut writer, req).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+    }
 }

@@ -3,6 +3,8 @@
 //! Abstracts session lifecycle operations so the core domain
 //! does not depend on a specific in-memory implementation.
 
+use std::time::Duration;
+
 use crate::crypto::secret_buf::SecretBuf;
 use crate::error::Result;
 use crate::session::types::{SessionAlgorithm, SessionDuration, SessionInfo, SessionToken};
@@ -19,6 +21,10 @@ pub trait SessionManager: Send + Sync {
     /// Returns an opaque session token that the client stores to
     /// resume this session later.
     ///
+    /// The `idle_timeout` parameter sets how long a session can be
+    /// unused before it expires. Each successful resume resets the
+    /// idle timer.
+    ///
     /// # Errors
     ///
     /// Returns `SessionError::TooManySessions` if the limit is reached.
@@ -29,6 +35,7 @@ pub trait SessionManager: Send + Sync {
         mackey: &SecretBuf,
         vault_id: &[u8; 16],
         duration: SessionDuration,
+        idle_timeout: Duration,
         algorithm: SessionAlgorithm,
     ) -> Result<SessionToken>;
 
