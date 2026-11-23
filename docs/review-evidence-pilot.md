@@ -1,0 +1,10 @@
+# Padlock review evidence pilot
+
+Use this checklist when the maintainer selects a Padlock PR for the pilot. The author supplies evidence, a separate reviewer verifies it, and the maintainer records PASS or HOLD before merging. GitHub's existing protections continue to apply. The pilot decision is enforced by the maintainer at merge time.
+
+1. Pin the PR head, current target base, and GitHub test-merge SHA. The author links the observed change or regression and the commands, environment, and result. Use disposable vaults and synthetic secrets for CLI evidence.
+2. Open the Rust CI run and confirm the exact checkout in the log. Require completed, successful workspace build, tests, strict all-target Clippy, and fmt. For a PR run, verify that the tested merge commit has the current base and head as parents. For a push run, verify that checkout equals the head and use it as supplemental evidence. Record any additional platform coverage separately.
+3. A reviewer who did not author or implement the change inspects the pinned revision and independently checks the risky behavior or verifies its evidence. Record the reviewer identity, full head SHA, evidence link, and verdict in a durable review record. A GitHub approval can supply that record when the independent reviewer has access. An automated check by itself cannot supply independent approval.
+4. Before merging, the maintainer rechecks the tuple and records the decision. A head change requires new review and checks. A base or test-merge change requires CI for the new tuple and reviewer reconfirmation of the integration. Treat missing, stale, failed, or skipped evidence, self-approval, and unresolved blocking findings as HOLD. Keep changes outside the pilot on their existing process.
+
+Start with this PR and one subsequent Padlock change. Record how often evidence is stale or missing, whether independent verification finds additional defects, and the effort to reproduce the checks. Review the results before expanding the pilot.
