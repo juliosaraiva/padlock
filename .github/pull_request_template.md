@@ -49,6 +49,14 @@ is identified for a domain, ask the repository maintainer to name one and record
 - UI changes — Attach a screenshot or recording showing the affected flow.
 - Automated findings — Link each finding and record either the fix with verification evidence or the reason for dismissing it. State when no findings were reported or when automated review did not run.
 
+## Independent verification (Padlock pilot)
+
+- Exact PR head and base SHAs, tested checkout SHA, and Rust CI run link —
+- Independent reviewer and link to their exact-head verdict —
+- Behavior or evidence the reviewer independently checked —
+
+<!-- Follow docs/review-evidence-pilot.md. Record HOLD for missing, failed, skipped, or stale evidence. -->
+
 ## Revert and rollout
 
 - Revert or recovery steps —
